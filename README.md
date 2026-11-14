@@ -81,6 +81,7 @@ sudo bash install.sh --keep-desktop   # leave dark style, dimming and idle times
 sudo bash install.sh --no-hibernate   # no swapfile change, no resume boot option
 sudo bash install.sh --no-speaker-tuning  # woofer fix only, no Dolby sound profile
 sudo bash install.sh --no-face-login  # do not install Howdy
+sudo bash install.sh --no-claude      # do not install Claude Desktop and Claude Code
 sudo bash install.sh --no-lpmd        # do not install intel-lpmd
 ```
 
@@ -171,6 +172,31 @@ sudo linux-enable-ir-emitter setup-howdy
 
 Skip face login with `--no-face-login`. Remove it later with `sudo apt remove howdy howdy-gtk`.
 
+## Claude Desktop and Claude Code
+
+The script installs both from Anthropic's own apt repositories, so they update with the normal system updates (`sudo apt update && sudo apt upgrade`):
+
+| Package | What it is | Start it with |
+|---|---|---|
+| `claude-desktop` | The desktop app: Chat, Cowork and Claude Code. A beta on Linux. | "Claude" in the application menu |
+| `claude-code` | The terminal command. | `claude` |
+
+How it is done:
+
+- **Signing key check:** before either repository is trusted, the script downloads Anthropic's signing key and compares its fingerprint with the published one (`31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE`). If it differs, nothing is installed.
+- **Release channel:** Claude Code comes from the `stable` channel, about a week behind the newest release. To follow every release, change `stable stable` to `latest latest` in `/etc/apt/sources.list.d/claude-code.list`.
+- **Cowork:** it runs its tasks in a virtual machine, so the script adds you to the `kvm` group. Log out and back in once for that to apply.
+
+After the install, open Claude and sign in, then run `claude` in a terminal and sign in there too. Your settings, skills and session history are not copied from Windows; they live in `~/.claude` and have to be brought over separately.
+
+Things to know about the Linux beta:
+
+- **Ubuntu 26.10 is not on Anthropic's tested list** (Ubuntu 22.04 or later is the stated requirement). Every package it depends on exists in 26.10, but it has not been run there by this kit.
+- **Not available yet:** Computer Use and dictation.
+- **"Cowork requires the vhost_vsock kernel module":** run `sudo modprobe vhost_vsock` and restart the app.
+
+Skip both with `--no-claude`.
+
 ## Not covered
 
 - **NPU:** the kernel driver loads, but Intel's user-space driver is a separate download from GitHub.
@@ -182,4 +208,4 @@ Skip face login with `--no-face-login`. Remove it later with `sudo apt remove ho
 sudo bash install.sh --undo
 ```
 
-This removes every file listed above, the sound profile and Howdy (with its PPA), and puts your previous desktop settings back. Closing the lid suspends again. Ordinary Ubuntu packages stay installed and the swapfile keeps its new size. Reboot afterwards.
+This removes every file listed above, the sound profile, Howdy (with its PPA) and both Claude packages (with their repositories; `~/.claude` is kept), and puts your previous desktop settings back. Closing the lid suspends again. Ordinary Ubuntu packages stay installed and the swapfile keeps its new size. Reboot afterwards.

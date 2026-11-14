@@ -48,6 +48,18 @@ HOWDY_PPA=ppa:boltgolt/howdy
 HOWDY_CONFIG=/etc/howdy/config.ini
 HOWDY_MARKER=$STATE_DIR/howdy-installed-by-kit
 
+# Claude Desktop and the Claude Code CLI, from Anthropic's signed apt repositories.
+# Both repositories are signed with the same key; its fingerprint is published at
+# https://code.claude.com/docs/en/setup and checked before the key is trusted.
+CLAUDE_KEY_FPR=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
+CLAUDE_DESKTOP_KEY_URL=https://downloads.claude.ai/claude-desktop/key.asc
+CLAUDE_DESKTOP_KEY=/usr/share/keyrings/claude-desktop-archive-keyring.asc
+CLAUDE_DESKTOP_LIST=/etc/apt/sources.list.d/claude-desktop.list
+CLAUDE_CODE_KEY_URL=https://downloads.claude.ai/keys/claude-code.asc
+CLAUDE_CODE_KEY=/etc/apt/keyrings/claude-code.asc
+CLAUDE_CODE_LIST=/etc/apt/sources.list.d/claude-code.list
+CLAUDE_MARKER=$STATE_DIR/claude-installed-by-kit
+
 # Everything here is in the Ubuntu 26.10 archive (checked 2026-11-15).
 PACKAGES=(
     firmware-sof-signed alsa-ucm-conf alsa-utils      # sound firmware and routing
@@ -63,6 +75,8 @@ WITH_LPMD=1
 WITH_HIBERNATE=1
 WITH_SPEAKER_TUNING=1
 WITH_FACE_LOGIN=1
+WITH_CLAUDE=1
+CLAUDE_READY=0
 KEEP_DESKTOP=0
 WARNINGS=0
 DESK_USER=""
@@ -79,7 +93,7 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'EOF'
 Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-speaker-tuning]
-                            [--no-face-login] [--no-lpmd] [--force]
+                            [--no-face-login] [--no-claude] [--no-lpmd] [--force]
 
   --undo               remove what this script set up and put the desktop options back
                        (ordinary packages and the enlarged swapfile are left in place)
@@ -87,7 +101,8 @@ Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-spe
   --no-hibernate       do not set up hibernation (no swapfile change, no resume boot option)
   --no-speaker-tuning  fix the woofers only; do not add the Dolby sound profile
   --no-face-login      do not install Howdy face login
-  --no-lpmd            do not install intel-lpmd (Intel's workload-aware CPU daemon)
+  --no-claude          do not install Claude Desktop and the Claude Code CLI
+  --no-lpmd           do not install intel-lpmd (Intel's workload-aware CPU daemon)
   --force              run even if this is not a Yoga Slim 7 14IMH9 (83CV)
 EOF
 }
@@ -99,6 +114,7 @@ for arg in "$@"; do
         --no-hibernate) WITH_HIBERNATE=0 ;;
         --no-speaker-tuning) WITH_SPEAKER_TUNING=0 ;;
         --no-face-login) WITH_FACE_LOGIN=0 ;;
+        --no-claude) WITH_CLAUDE=0 ;;
         --no-lpmd) WITH_LPMD=0 ;;
         --force) FORCE=1 ;;
         -h|--help) usage; exit 0 ;;
@@ -710,6 +726,110 @@ remove_face_login() {
     rm -f "$HOWDY_MARKER"
 }
 
+# ---------------------------------------------------------------------------
+# Claude Desktop (the app) and Claude Code (the "claude" terminal command),
+# installed from Anthropic's own apt repositories so that both update with the
+# normal system updates.
+
+# fetch_verified_key URL DEST: downloads a signing key and installs it only if
+# its fingerprint is exactly Anthropic's published one. Returns 1 when the
+# download fails and 2 when the fingerprint is wrong.
+fetch_verified_key() {
+    local tmp gpghome fprs
+    tmp=$(mktemp)
+    gpghome=$(mktemp -d)
+    if ! curl -fsSLo "$tmp" "$1"; then
+        rm -rf "$tmp" "$gpghome"
+        return 1
+    fi
+    # The primary-key fingerprints in the file; there must be exactly one.
+    fprs=$(GNUPGHOME="$gpghome" gpg --show-keys --with-colons "$tmp" 2>/dev/null \
+        | awk -F: '$1 == "pub" { primary = 1 } $1 == "fpr" && primary { print $10; primary = 0 }')
+    rm -rf "$gpghome"
+    if [ "$fprs" != "$CLAUDE_KEY_FPR" ]; then
+        rm -f "$tmp"
+        return 2
+    fi
+    install -D -m 644 "$tmp" "$2"
+    rm -f "$tmp"
+}
+
+# add_claude_repo NAME KEY_URL KEY_FILE LIST_FILE DEB_LINE
+add_claude_repo() {
+    local rc
+    fetch_verified_key "$2" "$3"
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+        warn "$1: could not download the signing key ($2)"
+        return 1
+    elif [ "$rc" -ne 0 ]; then
+        warn "$1: the downloaded signing key is not Anthropic's ($CLAUDE_KEY_FPR); nothing was installed"
+        return 1
+    fi
+    echo "$5" > "$4"
+    ok "$1: signing key verified, repository added"
+}
+
+setup_claude() {
+    say "Claude Desktop and Claude Code"
+    if [ "$WITH_CLAUDE" -eq 0 ]; then
+        skip "left alone (--no-claude)"
+        return
+    fi
+    apt_install_each curl gnupg || return
+    mkdir -p "$STATE_DIR" /etc/apt/keyrings
+
+    local have_desktop=0 have_code=0
+    add_claude_repo "Claude Desktop" "$CLAUDE_DESKTOP_KEY_URL" "$CLAUDE_DESKTOP_KEY" "$CLAUDE_DESKTOP_LIST" \
+        "deb [arch=amd64,arm64 signed-by=$CLAUDE_DESKTOP_KEY] https://downloads.claude.ai/claude-desktop/apt/stable stable main" \
+        && have_desktop=1
+    # "stable" is about a week behind the newest release and skips releases with regressions.
+    add_claude_repo "Claude Code" "$CLAUDE_CODE_KEY_URL" "$CLAUDE_CODE_KEY" "$CLAUDE_CODE_LIST" \
+        "deb [signed-by=$CLAUDE_CODE_KEY] https://downloads.claude.ai/claude-code/apt/stable stable main" \
+        && have_code=1
+    [ "$have_desktop" -eq 1 ] || [ "$have_code" -eq 1 ] || return
+    touch "$CLAUDE_MARKER"
+    apt-get update -q >/dev/null 2>&1 || warn "apt-get update reported a problem"
+
+    if [ "$have_desktop" -eq 1 ]; then
+        # With its recommended packages, which Cowork needs (QEMU and UEFI firmware).
+        if apt-get install -y -q claude-desktop >/dev/null; then
+            ok "claude-desktop installed (open 'Claude' from the application menu)"
+            CLAUDE_READY=1
+        else
+            warn "claude-desktop did not install. It is a beta that Anthropic tests on Ubuntu LTS releases; see /var/log/apt/term.log"
+        fi
+    fi
+    if [ "$have_code" -eq 1 ]; then
+        if apt-get install -y -q claude-code >/dev/null; then
+            ok "claude-code installed ($(claude --version 2>/dev/null || echo 'run: claude --version'))"
+            CLAUDE_READY=1
+        else
+            warn "claude-code did not install; see /var/log/apt/term.log"
+        fi
+    fi
+
+    # Cowork runs its tasks in a virtual machine and needs the kvm group for that.
+    local user=${SUDO_USER:-}
+    if [ -n "$user" ] && [ "$user" != root ] && getent group kvm >/dev/null; then
+        if id -nG "$user" | tr ' ' '\n' | grep -qx kvm; then
+            skip "$user is already in the kvm group"
+        elif usermod -aG kvm "$user"; then
+            ok "$user added to the kvm group for Cowork (takes effect after you log out and in)"
+        else
+            warn "could not add $user to the kvm group; Cowork may report a permission problem"
+        fi
+    fi
+}
+
+remove_claude() {
+    [ -f "$CLAUDE_MARKER" ] || return 0
+    apt-get remove -y -q claude-desktop claude-code >/dev/null 2>&1 && ok "claude-desktop and claude-code removed" \
+        || warn "could not remove claude-desktop / claude-code"
+    rm -f "$CLAUDE_DESKTOP_LIST" "$CLAUDE_CODE_LIST" "$CLAUDE_CODE_KEY" "$CLAUDE_MARKER"
+    echo "   note  your Claude settings and history in ~/.claude were kept"
+}
+
 restore_desktop() {
     [ -s "$GS_BACKUP" ] || return 0
     if ! find_desktop_user "$(cat "$GS_USER_FILE" 2>/dev/null)"; then
@@ -744,6 +864,7 @@ undo() {
     nmcli general reload conf >/dev/null 2>&1
     [ "$had_grub" -eq 1 ] && command -v update-grub >/dev/null && update-grub >/dev/null 2>&1
     command -v update-initramfs >/dev/null && update-initramfs -u -k all >/dev/null 2>&1
+    remove_claude
     remove_face_login
     remove_speaker_sound
     restore_desktop
@@ -769,6 +890,7 @@ setup_hibernate
 tune_desktop
 tune_speaker_sound
 setup_face_login
+setup_claude
 
 say "Current state"
 "$HELPER" status || true
@@ -786,4 +908,7 @@ echo "  3. yoga-power measure               (on battery: the real power draw)"
 if [ "$FACE_LOGIN_READY" -eq 1 ]; then
     echo "  4. sudo howdy add                   (look at the camera: saves your face)"
     echo "  5. sudo howdy test                  (shows what the infrared camera sees; see README if it is black)"
+fi
+if [ "$CLAUDE_READY" -eq 1 ]; then
+    echo "  -  open Claude from the application menu and sign in; in a terminal, run: claude"
 fi
