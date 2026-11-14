@@ -77,6 +77,9 @@ WITH_SPEAKER_TUNING=1
 WITH_FACE_LOGIN=1
 WITH_CLAUDE=1
 CLAUDE_READY=0
+KEEP_KEYRING=0
+KEYRING_NAME=Default_keyring
+KEYRING_BACKUP=$STATE_DIR/keyring-default.before
 KEEP_DESKTOP=0
 WARNINGS=0
 DESK_USER=""
@@ -93,7 +96,8 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'EOF'
 Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-speaker-tuning]
-                            [--no-face-login] [--no-claude] [--no-lpmd] [--force]
+                            [--no-face-login] [--no-claude] [--keep-keyring] [--no-lpmd]
+                            [--force]
 
   --undo               remove what this script set up and put the desktop options back
                        (ordinary packages and the enlarged swapfile are left in place)
@@ -102,6 +106,8 @@ Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-spe
   --no-speaker-tuning  fix the woofers only; do not add the Dolby sound profile
   --no-face-login      do not install Howdy face login
   --no-claude          do not install Claude Desktop and the Claude Code CLI
+  --keep-keyring       leave the password keyring alone (it stays locked by your login
+                       password, and asks for it after a face login)
   --no-lpmd            do not install intel-lpmd (Intel's workload-aware CPU daemon)
   --force              run even if this is not a Yoga Slim 7 14IMH9 (83CV)
 EOF
@@ -115,6 +121,7 @@ for arg in "$@"; do
         --no-speaker-tuning) WITH_SPEAKER_TUNING=0 ;;
         --no-face-login) WITH_FACE_LOGIN=0 ;;
         --no-claude) WITH_CLAUDE=0 ;;
+        --keep-keyring) KEEP_KEYRING=1 ;;
         --no-lpmd) WITH_LPMD=0 ;;
         --force) FORCE=1 ;;
         -h|--help) usage; exit 0 ;;
@@ -830,6 +837,76 @@ remove_claude() {
     echo "   note  your Claude settings and history in ~/.claude were kept"
 }
 
+# ---------------------------------------------------------------------------
+# Password keyring. GNOME keeps saved passwords (browser, Wi-Fi, app sign-ins)
+# in a keyring that is normally encrypted with the login password. After a face
+# login nothing has typed that password, so every application that needs the
+# keyring asks for it. This makes a keyring WITHOUT a password the default one:
+# no more prompts, but what is saved in it is not encrypted.
+keyring_is_passwordless() {
+    # A keyring file without a password is plain text starting with [keyring];
+    # an encrypted one is binary.
+    [ -f "$1" ] && head -c 9 "$1" 2>/dev/null | grep -q '^\[keyring\]$'
+}
+
+setup_keyring() {
+    say "Password keyring (no password prompts)"
+    if [ "$KEEP_KEYRING" -eq 1 ]; then
+        skip "left alone (--keep-keyring)"
+        return
+    fi
+    local user=${SUDO_USER:-} home dir file pointer current
+    if [ -z "$user" ] || [ "$user" = root ]; then
+        warn "run this script with sudo from your own account to set up the keyring"
+        return
+    fi
+    home=$(getent passwd "$user" | cut -d: -f6)
+    dir=$home/.local/share/keyrings
+    file=$dir/$KEYRING_NAME.keyring
+    pointer=$dir/default
+    current=$(cat "$pointer" 2>/dev/null || true)
+
+    if [ "$current" = "$KEYRING_NAME" ] && keyring_is_passwordless "$file"; then
+        skip "the default keyring already has no password"
+        return
+    fi
+    if [ -f "$file" ] && ! keyring_is_passwordless "$file"; then
+        warn "$file exists and is password-protected; left untouched"
+        return
+    fi
+
+    mkdir -p "$STATE_DIR"
+    # Remember what was the default before, so --undo can put it back.
+    [ -f "$KEYRING_BACKUP" ] || printf '%s' "${current:-login}" > "$KEYRING_BACKUP"
+
+    sudo -u "$user" mkdir -p "$dir" && chmod 700 "$dir"
+    if [ ! -f "$file" ]; then
+        printf '[keyring]\ndisplay-name=Default keyring\nctime=%s\nmtime=0\nlock-on-idle=false\nlock-after=false\n' "$(date +%s)" \
+            | sudo -u "$user" tee "$file" >/dev/null
+        chmod 600 "$file"
+    fi
+    printf '%s' "$KEYRING_NAME" | sudo -u "$user" tee "$pointer" >/dev/null
+
+    if [ "$(cat "$pointer" 2>/dev/null)" = "$KEYRING_NAME" ] && keyring_is_passwordless "$file"; then
+        ok "new saved passwords go to a keyring without a password (active after you log out and in)"
+        echo "   note  they are stored unencrypted in $file;"
+        echo "         anyone who can read this disk can read them. Disk encryption is what protects them."
+    else
+        warn "could not write the keyring files in $dir"
+    fi
+}
+
+restore_keyring() {
+    [ -f "$KEYRING_BACKUP" ] || return 0
+    local user=${SUDO_USER:-} home pointer
+    [ -n "$user" ] && [ "$user" != root ] || { warn "keyring not restored: run --undo with sudo from your own account"; return 1; }
+    home=$(getent passwd "$user" | cut -d: -f6)
+    pointer=$home/.local/share/keyrings/default
+    sudo -u "$user" tee "$pointer" < "$KEYRING_BACKUP" >/dev/null && ok "default keyring set back to '$(cat "$KEYRING_BACKUP")'"
+    rm -f "$KEYRING_BACKUP"
+    echo "   note  $home/.local/share/keyrings/$KEYRING_NAME.keyring was kept: it holds the passwords saved meanwhile"
+}
+
 restore_desktop() {
     [ -s "$GS_BACKUP" ] || return 0
     if ! find_desktop_user "$(cat "$GS_USER_FILE" 2>/dev/null)"; then
@@ -864,6 +941,7 @@ undo() {
     nmcli general reload conf >/dev/null 2>&1
     [ "$had_grub" -eq 1 ] && command -v update-grub >/dev/null && update-grub >/dev/null 2>&1
     command -v update-initramfs >/dev/null && update-initramfs -u -k all >/dev/null 2>&1
+    restore_keyring
     remove_claude
     remove_face_login
     remove_speaker_sound
@@ -890,6 +968,7 @@ setup_hibernate
 tune_desktop
 tune_speaker_sound
 setup_face_login
+setup_keyring
 setup_claude
 
 say "Current state"

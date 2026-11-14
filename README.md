@@ -82,6 +82,7 @@ sudo bash install.sh --no-hibernate   # no swapfile change, no resume boot optio
 sudo bash install.sh --no-speaker-tuning  # woofer fix only, no Dolby sound profile
 sudo bash install.sh --no-face-login  # do not install Howdy
 sudo bash install.sh --no-claude      # do not install Claude Desktop and Claude Code
+sudo bash install.sh --keep-keyring   # keep the keyring locked by your login password
 sudo bash install.sh --no-lpmd        # do not install intel-lpmd
 ```
 
@@ -157,7 +158,7 @@ sudo -i            # in a new terminal: should recognise you without a password
 What to expect:
 
 - **Where it works:** the login screen, the lock screen and `sudo`. Your face is tried first; if you are not recognised, the password prompt follows as usual.
-- **Keyring prompt:** after a face login, GNOME asks for your password once to unlock saved passwords, because they are encrypted with it.
+- **Keyring prompt:** a face login cannot unlock a password-protected keyring, so the script sets up a keyring without a password. See the next section.
 - **Security:** Howdy's authors say plainly that it is less secure than a password and must not be the only way in. A good photo or a lookalike may pass.
 - **Lid closed:** Howdy skips itself, so a docked laptop asks for the password straight away.
 
@@ -171,6 +172,27 @@ sudo linux-enable-ir-emitter setup-howdy
 ```
 
 Skip face login with `--no-face-login`. Remove it later with `sudo apt remove howdy howdy-gtk`.
+
+## Password keyring without a password
+
+GNOME keeps saved passwords (browser, application sign-ins, some Wi-Fi) in a keyring that is normally encrypted with your login password. After a face login nothing has typed that password, so every application that needs the keyring asks for it.
+
+The script stops those prompts by making a keyring that has no password the default one:
+
+| File | What it is |
+|---|---|
+| `~/.local/share/keyrings/Default_keyring.keyring` | The new keyring, in gnome-keyring's plain-text format. |
+| `~/.local/share/keyrings/default` | Names the keyring applications use by default. Was `login`, now `Default_keyring`. |
+
+It takes effect the next time you log in.
+
+**The trade-off:** anything saved in that keyring is stored unencrypted. Anyone who can read the disk, for example by booting the laptop from a USB stick, can read those passwords. Disk encryption is what protects them; you choose it in the Ubuntu installer ("Encrypt this installation"), and it asks for a passphrase at every boot.
+
+Other details:
+
+- The original `login` keyring is left untouched. Anything already saved in it stays there, still protected by your login password.
+- `sudo`, the lock screen and the login screen are not affected; those are handled by face login, with your password as the fallback.
+- Skip this with `--keep-keyring`. To go back later, `sudo bash install.sh --undo` points the default back to `login` and keeps the password-less keyring file, because it holds whatever was saved meanwhile.
 
 ## Claude Desktop and Claude Code
 
