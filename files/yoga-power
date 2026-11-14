@@ -390,6 +390,18 @@ status() {
     else
         row "woofers" "could not check (ALC287 codec or amixer not found)"
     fi
+    if ls "${HOME:-/nonexistent}"/.config/pipewire/pipewire.conf.d/*[Dd]olby* >/dev/null 2>&1; then
+        row "sound profile" "installed (Dolby filter)"
+    else
+        row "sound profile" "not installed for this user"
+    fi
+
+    echo "Face login"
+    if [ -r "$ROOT/etc/howdy/config.ini" ]; then
+        row "howdy" "installed, camera: $(awk -F' *= *' '$1 == "device_path" { print $2 }' "$ROOT/etc/howdy/config.ini")"
+    else
+        row "howdy" "not installed"
+    fi
 }
 
 case "${1:-}" in

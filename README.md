@@ -14,6 +14,7 @@ yoga-power status
 sudo yoga-power hibernate-test    # check that hibernation really resumes
 sudo yoga-power lid hibernate     # only after the test worked
 yoga-power measure                # on battery: the real power draw
+sudo howdy add                    # save your face for face login
 ```
 
 The script only runs on an 83CV, refuses to run in the live USB session, and can be run again safely.
@@ -78,6 +79,8 @@ Everything the script does is logged to `/var/log/yoga-slim7-tuning.log`.
 ```bash
 sudo bash install.sh --keep-desktop   # leave dark style, dimming and idle times alone
 sudo bash install.sh --no-hibernate   # no swapfile change, no resume boot option
+sudo bash install.sh --no-speaker-tuning  # woofer fix only, no Dolby sound profile
+sudo bash install.sh --no-face-login  # do not install Howdy
 sudo bash install.sh --no-lpmd        # do not install intel-lpmd
 ```
 
@@ -120,22 +123,55 @@ sudo yoga-power battery full      # charge to 100%
 - **External USB devices.** Blanket USB power saving makes mice and keyboards lag.
 - **TLP.** It conflicts with `power-profiles-daemon`.
 
-## Speaker tuning (optional)
+## Speaker sound profile
 
-The woofer fix gives full-range sound, but not the Dolby tuning Windows applies.
-`dolby-tuning/` holds this laptop's own tuning file, copied from its Windows driver.
-To turn it into an EasyEffects preset:
+The woofer fix makes all four speakers play. On top of that, the script rebuilds the sound profile Windows applies:
+
+- `dolby-tuning/` holds this laptop's own Dolby tuning file, copied from its Windows driver.
+- The script downloads [speaker-tuning-to-easyeffects](https://github.com/antoinecellerier/speaker-tuning-to-easyeffects) (pinned to `v2026.10.1`) into `/opt/yoga-slim7` and runs its `dolby_to_pipewire.py` as you.
+- The result is a PipeWire filter in `~/.config/pipewire/pipewire.conf.d/` that loads every time sound starts. No extra application has to run.
+
+The sound cuts out for a moment while it installs. Judge the result after the reboot, when the woofers are active.
 
 ```bash
-sudo apt install easyeffects python3-numpy python3-scipy python3-rich python3-rich-argparse git
-git clone https://github.com/antoinecellerier/speaker-tuning-to-easyeffects.git
-cd speaker-tuning-to-easyeffects
-python3 dolby_to_easyeffects.py /path/to/dolby-tuning/DEV_0287_SUBSYS_17AA38D8_PCI_SUBSYS_383917AA.xml --autoload
+python3 /opt/yoga-slim7/speaker-tuning-to-easyeffects/dolby_to_pipewire.py --doctor      # check it
+python3 /opt/yoga-slim7/speaker-tuning-to-easyeffects/dolby_to_pipewire.py --uninstall   # remove it
 ```
+
+It is close to the Windows sound, not identical: Dolby Atmos itself is Windows-only. Skip it with `--no-speaker-tuning`.
+
+## Face login
+
+The script installs [Howdy](https://github.com/boltgolt/howdy) 3 from its author's PPA (`ppa:boltgolt/howdy`), because it is not in the Ubuntu archive, and points it at the infrared camera. The install compiles a face-recognition library, which takes several minutes.
+
+After the reboot, enrol your face and test:
+
+```bash
+sudo howdy add     # look at the camera
+sudo howdy test    # shows what the infrared camera sees
+sudo -i            # in a new terminal: should recognise you without a password
+```
+
+What to expect:
+
+- **Where it works:** the login screen, the lock screen and `sudo`. Your face is tried first; if you are not recognised, the password prompt follows as usual.
+- **Keyring prompt:** after a face login, GNOME asks for your password once to unlock saved passwords, because they are encrypted with it.
+- **Security:** Howdy's authors say plainly that it is less secure than a password and must not be the only way in. A good photo or a lookalike may pass.
+- **Lid closed:** Howdy skips itself, so a docked laptop asks for the password straight away.
+
+If `sudo howdy test` shows a black or very dark picture, the infrared light is not switching on. That needs a one-off interactive setup with [linux-enable-ir-emitter](https://github.com/EmixamPP/linux-enable-ir-emitter), which asks you to watch the light, so the script cannot do it for you:
+
+```bash
+# download linux-enable-ir-emitter-7.0.0-release-x86-64.tar.gz from the project's releases page, then:
+sudo tar -C /usr/local/bin/ --no-same-owner -m -vxzf linux-enable-ir-emitter*.tar.gz
+linux-enable-ir-emitter configure
+sudo linux-enable-ir-emitter setup-howdy
+```
+
+Skip face login with `--no-face-login`. Remove it later with `sudo apt remove howdy howdy-gtk`.
 
 ## Not covered
 
-- **Face login:** the IR camera works, but Howdy is not in the Ubuntu 26.10 archive.
 - **NPU:** the kernel driver loads, but Intel's user-space driver is a separate download from GitHub.
 - **Dolby Atmos, Windows Studio Effects, Lenovo walk-away lock:** Windows only.
 
@@ -145,4 +181,4 @@ python3 dolby_to_easyeffects.py /path/to/dolby-tuning/DEV_0287_SUBSYS_17AA38D8_P
 sudo bash install.sh --undo
 ```
 
-This removes every file listed above and puts your previous desktop settings back. Closing the lid suspends again. Packages stay installed and the swapfile keeps its new size. Reboot afterwards.
+This removes every file listed above, the sound profile and Howdy (with its PPA), and puts your previous desktop settings back. Closing the lid suspends again. Ordinary Ubuntu packages stay installed and the swapfile keeps its new size. Reboot afterwards.

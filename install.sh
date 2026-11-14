@@ -34,6 +34,19 @@ SLEEP_CONF=/etc/systemd/sleep.conf.d/90-yoga-slim7.conf        # written by "yog
 HIB_SWAP=""
 HIB_SWAP_TYPE=""
 
+# Speaker sound tuning (Dolby profile rebuilt as a PipeWire filter)
+OPT_DIR=/opt/yoga-slim7
+TUNING_XML_NAME=DEV_0287_SUBSYS_17AA38D8_PCI_SUBSYS_383917AA.xml
+SPEAKER_TOOL_DIR=$OPT_DIR/speaker-tuning-to-easyeffects
+SPEAKER_TOOL_REPO=https://github.com/antoinecellerier/speaker-tuning-to-easyeffects.git
+SPEAKER_TOOL_TAG=v2026.10.1
+SPEAKER_PACKAGES=(git python3-numpy python3-scipy python3-rich lsp-plugins-lv2 calf-plugins lilv-utils)
+
+# Face login (Howdy 3, from its author's PPA; it is not in the Ubuntu archive)
+HOWDY_PPA=ppa:boltgolt/howdy
+HOWDY_CONFIG=/etc/howdy/config.ini
+HOWDY_MARKER=$STATE_DIR/howdy-installed-by-kit
+
 # Everything here is in the Ubuntu 26.10 archive (checked 2026-11-15).
 PACKAGES=(
     firmware-sof-signed alsa-ucm-conf alsa-utils      # sound firmware and routing
@@ -47,10 +60,14 @@ MODE=install
 FORCE=0
 WITH_LPMD=1
 WITH_HIBERNATE=1
+WITH_SPEAKER_TUNING=1
+WITH_FACE_LOGIN=1
 KEEP_DESKTOP=0
 WARNINGS=0
 DESK_USER=""
 DESK_UID=""
+DESK_HOME=""
+FACE_LOGIN_READY=0
 
 say()  { printf '\n== %s\n' "$*"; }
 ok()   { printf '   ok    %s\n' "$*"; }
@@ -60,14 +77,17 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-lpmd] [--force]
+Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-speaker-tuning]
+                            [--no-face-login] [--no-lpmd] [--force]
 
-  --undo          remove the files this script wrote and put the desktop options back
-                  (packages and the enlarged swapfile are left in place)
-  --keep-desktop  do not change desktop options (dark style, dimming, idle times)
-  --no-hibernate  do not set up hibernation (no swapfile change, no resume boot option)
-  --no-lpmd       do not install intel-lpmd (Intel's workload-aware CPU daemon)
-  --force         run even if this is not a Yoga Slim 7 14IMH9 (83CV)
+  --undo               remove what this script set up and put the desktop options back
+                       (ordinary packages and the enlarged swapfile are left in place)
+  --keep-desktop       do not change desktop options (dark style, dimming, idle times)
+  --no-hibernate       do not set up hibernation (no swapfile change, no resume boot option)
+  --no-speaker-tuning  fix the woofers only; do not add the Dolby sound profile
+  --no-face-login      do not install Howdy face login
+  --no-lpmd            do not install intel-lpmd (Intel's workload-aware CPU daemon)
+  --force              run even if this is not a Yoga Slim 7 14IMH9 (83CV)
 EOF
 }
 
@@ -76,6 +96,8 @@ for arg in "$@"; do
         --undo) MODE=undo ;;
         --keep-desktop) KEEP_DESKTOP=1 ;;
         --no-hibernate) WITH_HIBERNATE=0 ;;
+        --no-speaker-tuning) WITH_SPEAKER_TUNING=0 ;;
+        --no-face-login) WITH_FACE_LOGIN=0 ;;
         --no-lpmd) WITH_LPMD=0 ;;
         --force) FORCE=1 ;;
         -h|--help) usage; exit 0 ;;
@@ -460,7 +482,7 @@ EOF
 # ---------------------------------------------------------------------------
 # Desktop options are per user, so they are set as the user who ran sudo.
 as_user() {
-    sudo -u "$DESK_USER" env XDG_RUNTIME_DIR="/run/user/$DESK_UID" \
+    sudo -u "$DESK_USER" env HOME="$DESK_HOME" XDG_RUNTIME_DIR="/run/user/$DESK_UID" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$DESK_UID/bus" "$@"
 }
 
@@ -468,6 +490,8 @@ find_desktop_user() {
     DESK_USER=${1:-${SUDO_USER:-}}
     [ -n "$DESK_USER" ] && [ "$DESK_USER" != root ] || return 1
     DESK_UID=$(id -u "$DESK_USER" 2>/dev/null) || return 1
+    DESK_HOME=$(getent passwd "$DESK_USER" | cut -d: -f6)
+    [ -d "$DESK_HOME" ] || return 1
     [ -S "/run/user/$DESK_UID/bus" ] || return 1
     command -v gsettings >/dev/null || return 1
 }
@@ -518,6 +542,156 @@ tune_desktop() {
     gs_set $power sleep-inactive-battery-timeout 600         # ...for 10 minutes
 }
 
+# ---------------------------------------------------------------------------
+# Speaker sound. The woofer fix makes all four speakers play; this adds the
+# sound profile Windows applies on top (Dolby's tuning for this exact laptop),
+# rebuilt as a PipeWire filter that loads every time sound starts.
+apt_install_each() {
+    local pkg failed=0
+    for pkg in "$@"; do
+        if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
+            continue
+        fi
+        if apt-get install -y -q "$pkg" >/dev/null; then ok "$pkg"; else warn "could not install $pkg"; failed=1; fi
+    done
+    return "$failed"
+}
+
+speaker_filter_present() {
+    ls "$DESK_HOME"/.config/pipewire/pipewire.conf.d/*[Dd]olby* >/dev/null 2>&1
+}
+
+tune_speaker_sound() {
+    say "Speaker sound profile"
+    if [ "$WITH_SPEAKER_TUNING" -eq 0 ]; then
+        skip "left alone (--no-speaker-tuning)"
+        return
+    fi
+    local xml_src="$KIT_DIR/dolby-tuning/$TUNING_XML_NAME" xml="$OPT_DIR/dolby-tuning/$TUNING_XML_NAME"
+    if [ ! -f "$xml_src" ] && [ ! -f "$xml" ]; then
+        warn "tuning file dolby-tuning/$TUNING_XML_NAME is missing from the kit"
+        return
+    fi
+    if ! find_desktop_user; then
+        warn "no desktop session found. Run this script with sudo from a terminal inside GNOME to add the sound profile."
+        return
+    fi
+    if speaker_filter_present; then
+        skip "sound profile is already installed for $DESK_USER"
+        return
+    fi
+
+    apt_install_each "${SPEAKER_PACKAGES[@]}" || { warn "sound profile skipped because a package is missing"; return; }
+
+    # Keep the tuning file and the converter on the SSD, so the USB stick is not needed later.
+    mkdir -p "$OPT_DIR/dolby-tuning"
+    [ -f "$xml" ] || install -m 644 "$xml_src" "$xml"
+    if [ ! -f "$SPEAKER_TOOL_DIR/dolby_to_pipewire.py" ]; then
+        rm -rf "$SPEAKER_TOOL_DIR"
+        if ! git clone -q --depth 1 --branch "$SPEAKER_TOOL_TAG" "$SPEAKER_TOOL_REPO" "$SPEAKER_TOOL_DIR"; then
+            warn "could not download the converter ($SPEAKER_TOOL_REPO)"
+            return
+        fi
+        ok "converter $SPEAKER_TOOL_TAG downloaded to $SPEAKER_TOOL_DIR"
+    fi
+
+    # The converter refuses to run as root, so it runs as you. It restarts
+    # PipeWire, which cuts the sound for a moment.
+    if as_user sh -c 'cd "$HOME" && python3 "$1" "$2"' sh "$SPEAKER_TOOL_DIR/dolby_to_pipewire.py" "$xml" </dev/null; then
+        ok "sound profile installed for $DESK_USER (pick the 'Dolby' output in the sound menu if it is not selected)"
+    else
+        warn "the converter reported a problem; see its messages above. Check later with: python3 $SPEAKER_TOOL_DIR/dolby_to_pipewire.py --doctor"
+    fi
+}
+
+remove_speaker_sound() {
+    [ -f "$SPEAKER_TOOL_DIR/dolby_to_pipewire.py" ] || return 0
+    if find_desktop_user "$(cat "$GS_USER_FILE" 2>/dev/null)"; then
+        as_user sh -c 'cd "$HOME" && python3 "$1" --uninstall --yes' sh "$SPEAKER_TOOL_DIR/dolby_to_pipewire.py" </dev/null \
+            && ok "sound profile removed" || warn "could not remove the sound profile"
+    else
+        warn "sound profile not removed: run --undo with sudo from a terminal inside GNOME"
+        return 1
+    fi
+    rm -rf "$OPT_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# Face login with the infrared camera, using Howdy. Howdy tries your face
+# first; if it does not recognise you, the normal password prompt follows.
+find_ir_camera() {
+    local dev link
+    for dev in /dev/video*; do
+        [ -e "$dev" ] || continue
+        # The infrared sensor is the camera node that only offers greyscale.
+        if v4l2-ctl -d "$dev" --list-formats 2>/dev/null | grep -q "'GREY'"; then
+            # Prefer the by-path name: /dev/videoN numbers can change between boots.
+            for link in /dev/v4l/by-path/*; do
+                [ "$(readlink -f "$link" 2>/dev/null)" = "$dev" ] && { echo "$link"; return 0; }
+            done
+            echo "$dev"
+            return 0
+        fi
+    done
+    return 1
+}
+
+setup_face_login() {
+    say "Face login (Howdy)"
+    if [ "$WITH_FACE_LOGIN" -eq 0 ]; then
+        skip "left alone (--no-face-login)"
+        return
+    fi
+
+    if dpkg-query -W -f='${Status}' howdy 2>/dev/null | grep -q 'install ok installed'; then
+        skip "howdy (already installed)"
+    else
+        apt_install_each software-properties-common v4l-utils || return
+        if ! add-apt-repository -y "$HOWDY_PPA" >/dev/null 2>&1; then
+            warn "could not add $HOWDY_PPA"
+            return
+        fi
+        apt-get update -q >/dev/null 2>&1
+        echo "   ...   installing Howdy. It compiles its face-recognition library; this takes several minutes."
+        if apt-get install -y -q howdy howdy-gtk >/dev/null; then
+            mkdir -p "$STATE_DIR"
+            touch "$HOWDY_MARKER"
+            ok "howdy installed from $HOWDY_PPA"
+        else
+            warn "Howdy did not install; see /var/log/apt/term.log"
+            return
+        fi
+    fi
+
+    if grep -qs pam_howdy /etc/pam.d/common-auth; then
+        ok "login, lock screen and sudo try your face first, then ask for the password"
+    else
+        warn "Howdy is installed but not active in the login settings; run: sudo pam-auth-update"
+    fi
+
+    local cam
+    if [ ! -f "$HOWDY_CONFIG" ]; then
+        warn "$HOWDY_CONFIG not found; set the camera with: sudo howdy config"
+    elif cam=$(find_ir_camera); then
+        sed -i "s|^device_path *=.*|device_path = $cam|" "$HOWDY_CONFIG"
+        if grep -qF "device_path = $cam" "$HOWDY_CONFIG"; then
+            ok "infrared camera set: $cam"
+        else
+            warn "could not write the camera into $HOWDY_CONFIG; set device_path yourself with: sudo howdy config"
+        fi
+    else
+        warn "no infrared camera found; set device_path yourself with: sudo howdy config"
+    fi
+    FACE_LOGIN_READY=1
+}
+
+remove_face_login() {
+    [ -f "$HOWDY_MARKER" ] || return 0
+    apt-get remove -y -q howdy howdy-gtk >/dev/null 2>&1 && ok "howdy removed" || warn "could not remove howdy"
+    add-apt-repository -y --remove "$HOWDY_PPA" >/dev/null 2>&1
+    rm -f "$HOWDY_MARKER"
+}
+
 restore_desktop() {
     [ -s "$GS_BACKUP" ] || return 0
     if ! find_desktop_user "$(cat "$GS_USER_FILE" 2>/dev/null)"; then
@@ -552,6 +726,8 @@ undo() {
     nmcli general reload conf >/dev/null 2>&1
     [ "$had_grub" -eq 1 ] && command -v update-grub >/dev/null && update-grub >/dev/null 2>&1
     command -v update-initramfs >/dev/null && update-initramfs -u -k all >/dev/null 2>&1
+    remove_face_login
+    remove_speaker_sound
     restore_desktop
     echo
     echo "Done. Packages were left installed, and the swapfile was left at its current size."
@@ -573,6 +749,8 @@ tune_boot
 install_tools
 setup_hibernate
 tune_desktop
+tune_speaker_sound
+setup_face_login
 
 say "Current state"
 "$HELPER" status || true
@@ -587,3 +765,7 @@ echo "Reboot now so the speaker fix and the boot options take effect. After the 
 echo "  1. sudo yoga-power hibernate-test   (check that hibernation really resumes)"
 echo "  2. sudo yoga-power lid hibernate    (only after step 1 worked: hibernate when the lid closes)"
 echo "  3. yoga-power measure               (on battery: the real power draw)"
+if [ "$FACE_LOGIN_READY" -eq 1 ]; then
+    echo "  4. sudo howdy add                   (look at the camera: saves your face)"
+    echo "  5. sudo howdy test                  (shows what the infrared camera sees; see README if it is black)"
+fi
