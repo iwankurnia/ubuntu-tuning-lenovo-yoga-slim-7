@@ -843,10 +843,29 @@ remove_claude() {
 # login nothing has typed that password, so every application that needs the
 # keyring asks for it. This makes a keyring WITHOUT a password the default one:
 # no more prompts, but what is saved in it is not encrypted.
+# Everything inside the home folder is read and written AS THE USER, never as
+# root, and links are refused: root must not follow a link that sits in a
+# folder the user controls.
 keyring_is_passwordless() {
+    # keyring_is_passwordless USER FILE
     # A keyring file without a password is plain text starting with [keyring];
     # an encrypted one is binary.
-    [ -f "$1" ] && head -c 9 "$1" 2>/dev/null | grep -q '^\[keyring\]$'
+    [ ! -L "$2" ] && sudo -u "$1" test -f "$2" \
+        && sudo -u "$1" head -c 9 "$2" 2>/dev/null | grep -q '^\[keyring\]$'
+}
+
+# A keyring name as gnome-keyring writes it; anything else is treated as "login".
+valid_keyring_name() {
+    # Checked as one whole string, so a second line cannot smuggle a valid-looking name past it.
+    [[ $1 =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$ ]]
+}
+
+# True when the folder sits on an encrypted (LUKS / dm-crypt) volume.
+on_encrypted_disk() {
+    local src
+    src=$(findmnt -no SOURCE -T "$1" 2>/dev/null) || return 1
+    src=${src%%\[*}                                  # btrfs shows /dev/x[/subvolume]
+    [ -n "$src" ] && lsblk -nso TYPE "$src" 2>/dev/null | grep -qx crypt
 }
 
 setup_keyring() {
@@ -864,33 +883,41 @@ setup_keyring() {
     dir=$home/.local/share/keyrings
     file=$dir/$KEYRING_NAME.keyring
     pointer=$dir/default
-    current=$(cat "$pointer" 2>/dev/null || true)
 
-    if [ "$current" = "$KEYRING_NAME" ] && keyring_is_passwordless "$file"; then
+    if [ -L "$dir" ] || [ -L "$file" ] || [ -L "$pointer" ]; then
+        warn "the keyring folder or one of its files is a link; left untouched"
+        return
+    fi
+    current=$(sudo -u "$user" cat "$pointer" 2>/dev/null || true)
+    valid_keyring_name "$current" || current=login
+
+    if [ "$current" = "$KEYRING_NAME" ] && keyring_is_passwordless "$user" "$file"; then
         skip "the default keyring already has no password"
         return
     fi
-    if [ -f "$file" ] && ! keyring_is_passwordless "$file"; then
+    if sudo -u "$user" test -e "$file" && ! keyring_is_passwordless "$user" "$file"; then
         warn "$file exists and is password-protected; left untouched"
         return
     fi
 
     mkdir -p "$STATE_DIR"
     # Remember what was the default before, so --undo can put it back.
-    [ -f "$KEYRING_BACKUP" ] || printf '%s' "${current:-login}" > "$KEYRING_BACKUP"
+    [ -f "$KEYRING_BACKUP" ] || printf '%s' "$current" > "$KEYRING_BACKUP"
 
-    sudo -u "$user" mkdir -p "$dir" && chmod 700 "$dir"
-    if [ ! -f "$file" ]; then
+    sudo -u "$user" install -d -m 700 "$dir"
+    if ! sudo -u "$user" test -e "$file"; then
         printf '[keyring]\ndisplay-name=Default keyring\nctime=%s\nmtime=0\nlock-on-idle=false\nlock-after=false\n' "$(date +%s)" \
-            | sudo -u "$user" tee "$file" >/dev/null
-        chmod 600 "$file"
+            | sudo -u "$user" sh -c 'umask 077; cat > "$1"' sh "$file"
     fi
-    printf '%s' "$KEYRING_NAME" | sudo -u "$user" tee "$pointer" >/dev/null
+    printf '%s' "$KEYRING_NAME" | sudo -u "$user" sh -c 'umask 077; cat > "$1"' sh "$pointer"
 
-    if [ "$(cat "$pointer" 2>/dev/null)" = "$KEYRING_NAME" ] && keyring_is_passwordless "$file"; then
+    if [ "$(sudo -u "$user" cat "$pointer" 2>/dev/null)" = "$KEYRING_NAME" ] && keyring_is_passwordless "$user" "$file"; then
         ok "new saved passwords go to a keyring without a password (active after you log out and in)"
-        echo "   note  they are stored unencrypted in $file;"
-        echo "         anyone who can read this disk can read them. Disk encryption is what protects them."
+        if on_encrypted_disk "$home"; then
+            echo "   note  they are not encrypted inside the keyring; your encrypted disk is what protects them"
+        else
+            warn "this disk is NOT encrypted, so anyone who can read it (for example by booting from a USB stick) can read the passwords saved in $file. Undo with: sudo bash install.sh --undo, or reinstall with disk encryption."
+        fi
     else
         warn "could not write the keyring files in $dir"
     fi
@@ -898,11 +925,22 @@ setup_keyring() {
 
 restore_keyring() {
     [ -f "$KEYRING_BACKUP" ] || return 0
-    local user=${SUDO_USER:-} home pointer
+    local user=${SUDO_USER:-} home pointer previous
     [ -n "$user" ] && [ "$user" != root ] || { warn "keyring not restored: run --undo with sudo from your own account"; return 1; }
     home=$(getent passwd "$user" | cut -d: -f6)
     pointer=$home/.local/share/keyrings/default
-    sudo -u "$user" tee "$pointer" < "$KEYRING_BACKUP" >/dev/null && ok "default keyring set back to '$(cat "$KEYRING_BACKUP")'"
+    previous=$(cat "$KEYRING_BACKUP")
+    valid_keyring_name "$previous" || previous=login
+    if [ -L "$pointer" ] || [ -L "$(dirname "$pointer")" ]; then
+        warn "keyring not restored: $pointer is a link"
+        return 1
+    fi
+    if printf '%s' "$previous" | sudo -u "$user" sh -c 'umask 077; cat > "$1"' sh "$pointer"; then
+        ok "default keyring set back to '$previous'"
+    else
+        warn "could not write $pointer"
+        return 1
+    fi
     rm -f "$KEYRING_BACKUP"
     echo "   note  $home/.local/share/keyrings/$KEYRING_NAME.keyring was kept: it holds the passwords saved meanwhile"
 }

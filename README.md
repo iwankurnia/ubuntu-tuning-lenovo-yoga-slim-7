@@ -188,6 +188,8 @@ It takes effect the next time you log in.
 
 **The trade-off:** anything saved in that keyring is stored unencrypted. Anyone who can read the disk, for example by booting the laptop from a USB stick, can read those passwords. Disk encryption is what protects them; you choose it in the Ubuntu installer ("Encrypt this installation"), and it asks for a passphrase at every boot.
 
+The script checks whether your home folder is on an encrypted disk. If it is not, it still sets this up, because you asked for no prompts, but it prints a warning and counts it in the final summary.
+
 Other details:
 
 - The original `login` keyring is left untouched. Anything already saved in it stays there, still protected by your login password.
