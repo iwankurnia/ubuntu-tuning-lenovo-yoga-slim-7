@@ -24,6 +24,16 @@ SLEEP_HOOK=/usr/lib/systemd/system-sleep/yoga-sleep-report
 HELPER=/usr/local/bin/yoga-power
 CONFIG=/etc/yoga-power.conf
 
+# Hibernation
+HIB_GRUB=/etc/default/grub.d/91-yoga-slim7-hibernate.cfg
+HIB_INITRAMFS=/etc/initramfs-tools/conf.d/yoga-slim7-resume
+HIB_DRACUT=/etc/dracut.conf.d/90-yoga-slim7-resume.conf
+FSTAB_BACKUP=/etc/fstab.yoga-slim7.bak
+LID_CONF=/etc/systemd/logind.conf.d/90-yoga-slim7-lid.conf     # written by "yoga-power lid"
+SLEEP_CONF=/etc/systemd/sleep.conf.d/90-yoga-slim7.conf        # written by "yoga-power lid"
+HIB_SWAP=""
+HIB_SWAP_TYPE=""
+
 # Everything here is in the Ubuntu 26.10 archive (checked 2026-11-15).
 PACKAGES=(
     firmware-sof-signed alsa-ucm-conf alsa-utils      # sound firmware and routing
@@ -36,6 +46,7 @@ LPMD_PACKAGE=intel-lpmd                               # Intel's workload-aware C
 MODE=install
 FORCE=0
 WITH_LPMD=1
+WITH_HIBERNATE=1
 KEEP_DESKTOP=0
 WARNINGS=0
 DESK_USER=""
@@ -49,11 +60,12 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-lpmd] [--force]
+Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-lpmd] [--force]
 
   --undo          remove the files this script wrote and put the desktop options back
-                  (packages are left installed)
+                  (packages and the enlarged swapfile are left in place)
   --keep-desktop  do not change desktop options (dark style, dimming, idle times)
+  --no-hibernate  do not set up hibernation (no swapfile change, no resume boot option)
   --no-lpmd       do not install intel-lpmd (Intel's workload-aware CPU daemon)
   --force         run even if this is not a Yoga Slim 7 14IMH9 (83CV)
 EOF
@@ -63,6 +75,7 @@ for arg in "$@"; do
     case "$arg" in
         --undo) MODE=undo ;;
         --keep-desktop) KEEP_DESKTOP=1 ;;
+        --no-hibernate) WITH_HIBERNATE=0 ;;
         --no-lpmd) WITH_LPMD=0 ;;
         --force) FORCE=1 ;;
         -h|--help) usage; exit 0 ;;
@@ -253,6 +266,143 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Hibernation writes the whole memory to swap and powers off, so it needs a
+# swap area at least as large as the RAM and a boot option that tells the
+# kernel where to find the saved image.
+
+# Finds a swap area big enough for a hibernation image. If there is none, the
+# swapfile is replaced by a larger one (or /swap.img is created).
+# Sets HIB_SWAP and HIB_SWAP_TYPE; returns non-zero after a WARN on failure.
+ensure_hibernate_swap() {
+    local mem_bytes=$1 need_gib=$2 name type size file=""
+    while read -r name type size; do
+        [ -n "$name" ] || continue
+        if [ "$size" -ge "$mem_bytes" ]; then
+            HIB_SWAP=$name
+            HIB_SWAP_TYPE=$type
+            skip "$name is already large enough ($((size / 1073741824)) GiB)"
+            return 0
+        fi
+        [ "$type" = file ] && [ -z "$file" ] && file=$name
+    done < <(swapon --show=NAME,TYPE,SIZE --bytes --noheadings 2>/dev/null)
+
+    [ -n "$file" ] || file=/swap.img
+    local dir new="$file.new" avail_kib fstype
+    dir=$(dirname "$file")
+    fstype=$(findmnt -no FSTYPE -T "$dir" 2>/dev/null)
+    if [ "$fstype" != ext4 ]; then
+        warn "$dir is on $fstype; this script only builds a hibernation swapfile on ext4"
+        return 1
+    fi
+    # The new file is written next to the old one first, and 10 GiB must stay free afterwards.
+    avail_kib=$(df --output=avail -k "$dir" | tail -n 1 | tr -d ' ')
+    if [ "$avail_kib" -lt $(( (need_gib + 10) * 1048576 )) ]; then
+        warn "not enough free disk space for a ${need_gib} GiB swapfile (free: $((avail_kib / 1048576)) GiB)"
+        return 1
+    fi
+
+    rm -f "$new"
+    if ! fallocate -l "${need_gib}G" "$new" || ! chmod 600 "$new" || ! mkswap -q "$new" >/dev/null; then
+        rm -f "$new"
+        warn "could not create ${need_gib} GiB swapfile $new; the existing swap was left untouched"
+        return 1
+    fi
+    if swapon --show=NAME --noheadings 2>/dev/null | grep -qxF "$file"; then
+        if ! swapoff "$file"; then
+            rm -f "$new"
+            warn "could not switch off $file (memory too full?). Close some applications and run this script again."
+            return 1
+        fi
+    fi
+    mv -f "$new" "$file"
+    if ! swapon -p 100 "$file"; then
+        warn "could not switch on the new swapfile $file"
+        return 1
+    fi
+
+    # Make it permanent, with the highest priority so hibernation always picks it.
+    [ -f "$FSTAB_BACKUP" ] || cp -a /etc/fstab "$FSTAB_BACKUP"
+    awk -v f="$file" '$1 != f' /etc/fstab > /etc/fstab.yoga-tmp \
+        && printf '%s none swap sw,pri=100 0 0\n' "$file" >> /etc/fstab.yoga-tmp \
+        && cat /etc/fstab.yoga-tmp > /etc/fstab
+    rm -f /etc/fstab.yoga-tmp
+
+    HIB_SWAP=$file
+    HIB_SWAP_TYPE=file
+    ok "swapfile $file is now ${need_gib} GiB (old /etc/fstab saved as $FSTAB_BACKUP)"
+}
+
+setup_hibernate() {
+    say "Hibernation"
+    if [ "$WITH_HIBERNATE" -eq 0 ]; then
+        skip "left alone (--no-hibernate)"
+        return
+    fi
+    if ! grep -qw disk /sys/power/state 2>/dev/null; then
+        warn "this kernel does not offer hibernation"
+        return
+    fi
+    if [ -r /sys/kernel/security/lockdown ] && ! grep -q '\[none\]' /sys/kernel/security/lockdown; then
+        warn "Secure Boot is on, and Ubuntu refuses to hibernate while it is. Switch Secure Boot off in the BIOS setup (press F2 at power-on, then Security > Secure Boot), boot Ubuntu and run this script again."
+        return
+    fi
+    if [ ! -f /etc/default/grub ] || ! command -v update-grub >/dev/null; then
+        warn "this install does not boot through GRUB; hibernation was not set up"
+        return
+    fi
+
+    local mem_kib mem_bytes need_gib uuid offset params
+    mem_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+    mem_bytes=$((mem_kib * 1024))
+    need_gib=$(( (mem_kib + 1048575) / 1048576 + 1 ))      # RAM rounded up, plus 1 GiB of headroom
+
+    ensure_hibernate_swap "$mem_bytes" "$need_gib" || return
+
+    if [ "$HIB_SWAP_TYPE" = file ]; then
+        uuid=$(findmnt -no UUID -T "$HIB_SWAP" 2>/dev/null)
+        # Where the file starts on the disk, counted in filesystem blocks.
+        offset=$(filefrag -v "$HIB_SWAP" 2>/dev/null | awk '$1 == "0:" { gsub(/\./, "", $4); print $4; exit }')
+        case "$offset" in
+            ''|*[!0-9]*) warn "could not read where $HIB_SWAP starts on the disk; hibernation was not set up"; return ;;
+        esac
+        params="resume=UUID=$uuid resume_offset=$offset"
+    else
+        uuid=$(blkid -s UUID -o value "$HIB_SWAP" 2>/dev/null)
+        params="resume=UUID=$uuid"
+    fi
+    if [ -z "$uuid" ]; then
+        warn "could not read the disk identifier for $HIB_SWAP; hibernation was not set up"
+        return
+    fi
+
+    mkdir -p /etc/default/grub.d
+    cat > "$HIB_GRUB" <<EOF
+# Yoga Slim 7 14IMH9 (written by yoga-slim7-ubuntu/install.sh).
+# Tells the kernel where the hibernation image is ($HIB_SWAP).
+# Run install.sh again if the swapfile is ever recreated: its position changes.
+GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT $params"
+EOF
+    if [ -d /etc/initramfs-tools/conf.d ]; then
+        echo "RESUME=UUID=$uuid" > "$HIB_INITRAMFS"
+    fi
+    if [ -d /usr/lib/dracut/modules.d ] && command -v dracut >/dev/null; then
+        mkdir -p /etc/dracut.conf.d
+        echo 'add_dracutmodules+=" resume "' > "$HIB_DRACUT"
+    fi
+
+    if ! update-grub >/dev/null 2>&1; then
+        rm -f "$HIB_GRUB"
+        warn "update-grub failed; hibernation was not set up"
+        return
+    fi
+    if command -v update-initramfs >/dev/null; then
+        update-initramfs -u -k all >/dev/null 2>&1 || warn "update-initramfs failed; resume from hibernation may not work"
+    fi
+    ok "boot option added: $params"
+    ok "hibernation is set up. It is NOT tied to the lid yet: reboot, then run  sudo yoga-power hibernate-test"
+}
+
+# ---------------------------------------------------------------------------
 install_tools() {
     say "Helper tools and automatic battery/mains switching"
     install -D -m 755 "$KIT_DIR/files/yoga-power" "$HELPER" \
@@ -391,18 +541,21 @@ undo() {
     say "Removing the tuning"
     systemctl disable --now yoga-power-auto.service >/dev/null 2>&1
     local f had_grub=0
-    [ -f "$GRUB_DROPIN" ] && had_grub=1
-    for f in "$AUDIO_CONF" "$SYSCTL_CONF" "$UDEV_RULES" "$NM_CONF" "$GRUB_DROPIN" "$AUTO_UNIT" "$SLEEP_HOOK" "$HELPER" "$CONFIG"; do
+    { [ -f "$GRUB_DROPIN" ] || [ -f "$HIB_GRUB" ]; } && had_grub=1
+    for f in "$AUDIO_CONF" "$SYSCTL_CONF" "$UDEV_RULES" "$NM_CONF" "$GRUB_DROPIN" "$AUTO_UNIT" "$SLEEP_HOOK" "$HELPER" "$CONFIG" \
+             "$HIB_GRUB" "$HIB_INITRAMFS" "$HIB_DRACUT" "$LID_CONF" "$SLEEP_CONF"; do
         if [ -e "$f" ]; then rm -f "$f" && ok "removed $f"; else skip "$f (not present)"; fi
     done
     systemctl daemon-reload
+    systemctl kill -s HUP systemd-logind 2>/dev/null
     udevadm control --reload 2>/dev/null
     nmcli general reload conf >/dev/null 2>&1
     [ "$had_grub" -eq 1 ] && command -v update-grub >/dev/null && update-grub >/dev/null 2>&1
-    command -v update-initramfs >/dev/null && update-initramfs -u >/dev/null
+    command -v update-initramfs >/dev/null && update-initramfs -u -k all >/dev/null 2>&1
     restore_desktop
     echo
-    echo "Done. Packages were left installed. Reboot to return to Ubuntu's defaults."
+    echo "Done. Packages were left installed, and the swapfile was left at its current size."
+    echo "Closing the lid suspends again. Reboot to return to Ubuntu's defaults."
 }
 
 # ---------------------------------------------------------------------------
@@ -418,6 +571,7 @@ tune_devices
 enable_services
 tune_boot
 install_tools
+setup_hibernate
 tune_desktop
 
 say "Current state"
@@ -429,5 +583,7 @@ if [ "$WARNINGS" -gt 0 ]; then
 else
     echo "Finished with no warnings. Log: $LOG"
 fi
-echo "Reboot now so the speaker fix and the boot option take effect."
-echo "Then unplug the charger and run:  yoga-power measure"
+echo "Reboot now so the speaker fix and the boot options take effect. After the reboot:"
+echo "  1. sudo yoga-power hibernate-test   (check that hibernation really resumes)"
+echo "  2. sudo yoga-power lid hibernate    (only after step 1 worked: hibernate when the lid closes)"
+echo "  3. yoga-power measure               (on battery: the real power draw)"

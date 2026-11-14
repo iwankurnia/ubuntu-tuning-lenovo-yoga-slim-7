@@ -52,12 +52,17 @@ case "$1" in
         t1=$(date +%s); r1=$(residency); e1=$(energy_uwh)
         if on_ac; then ac1=1; else ac1=0; fi
 
-        line=$(awk -v t0="$t0" -v t1="$t1" -v r0="$r0" -v r1="$r1" \
+        # $2 is the kind of sleep: suspend, hibernate, suspend-then-hibernate, ...
+        line=$(awk -v t0="$t0" -v t1="$t1" -v r0="$r0" -v r1="$r1" -v kind="$2" \
                    -v e0="$e0" -v e1="$e1" -v ac0="$ac0" -v ac1="$ac1" 'BEGIN {
             dt = t1 - t0; if (dt < 1) dt = 1
-            printf "slept %dh%02dm%02ds", dt / 3600, (dt % 3600) / 60, dt % 60
-            if (r0 >= 0 && r1 >= 0) printf ", S0ix %.0f%%", (r1 - r0) / (dt * 1000000) * 100
-            else                    printf ", S0ix n/a"
+            if (kind == "hibernate") printf "hibernated"; else printf "slept"
+            printf " %dh%02dm%02ds", dt / 3600, (dt % 3600) / 60, dt % 60
+            # S0ix only means something for a plain suspend; a hibernated laptop is off.
+            if (kind == "hibernate")        printf ""
+            else if (kind != "suspend")     printf " (%s)", kind
+            else if (r0 >= 0 && r1 >= 0)    printf ", S0ix %.0f%%", (r1 - r0) / (dt * 1000000) * 100
+            else                            printf ", S0ix n/a"
             if (ac0 == 1 || ac1 == 1) printf ", on mains power"
             else {
                 wh = (e0 - e1) / 1000000

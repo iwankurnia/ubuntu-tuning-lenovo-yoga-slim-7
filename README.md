@@ -7,11 +7,13 @@ Run it from a terminal inside your desktop session, so it can also set the deskt
 sudo bash install.sh
 ```
 
-Then reboot, unplug the charger and measure:
+Then reboot and finish in this order:
 
 ```bash
 yoga-power status
-yoga-power measure
+sudo yoga-power hibernate-test    # check that hibernation really resumes
+sudo yoga-power lid hibernate     # only after the test worked
+yoga-power measure                # on battery: the real power draw
 ```
 
 The script only runs on an 83CV, refuses to run in the live USB session, and can be run again safely.
@@ -33,6 +35,28 @@ The script only runs on an 83CV, refuses to run in the live USB session, and can
 | Power-efficient kernel work queues | Background kernel work runs on a core that is already awake. Skipped if the kernel already has it on. | `/etc/default/grub.d/90-yoga-slim7-power.cfg` |
 | `thermald`, `power-profiles-daemon`, `intel-lpmd` enabled | Intel's and Ubuntu's own power daemons. `intel-lpmd` adjusts the CPU's energy preference to the workload the CPU reports. | services |
 
+### Hibernation
+
+| Change | Why | Where |
+|---|---|---|
+| Swapfile enlarged to the RAM size plus 1 GiB (17 GiB here) | Hibernation writes the whole memory to swap. If an existing swap area is already big enough it is used as it is; otherwise the swapfile is replaced, or `/swap.img` is created. | `/swap.img`, `/etc/fstab` (old copy in `/etc/fstab.yoga-slim7.bak`) |
+| Resume boot option | Tells the kernel where the saved image is. | `/etc/default/grub.d/91-yoga-slim7-hibernate.cfg`, `/etc/initramfs-tools/conf.d/yoga-slim7-resume` |
+| Lid action | Set by you with `yoga-power lid ...` after the test passes. | `/etc/systemd/logind.conf.d/90-yoga-slim7-lid.conf` |
+
+**Secure Boot must be off.** Ubuntu's kernel refuses to hibernate while Secure Boot is on. If it is on, the script says so and skips this part; switch it off in the BIOS setup (F2 at power-on, Security, Secure Boot) and run the script again. If Windows with BitLocker is still on the disk, have its recovery key ready before changing this.
+
+The lid is not switched to hibernate automatically. A hibernation that fails to resume loses your open work, so test it once first:
+
+```bash
+sudo yoga-power hibernate-test             # powers off; press the power button; your windows should come back
+sudo yoga-power lid hibernate              # closing the lid hibernates: zero drain, about 20 s to wake
+sudo yoga-power lid suspend-then-hibernate # or: suspend first, hibernate after 30 minutes
+sudo yoga-power lid suspend                # back to Ubuntu's default
+```
+
+With an external monitor attached, closing the lid is still ignored, as on a stock Ubuntu.
+Run `install.sh` again if you ever recreate the swapfile: its position on the disk is part of the boot option.
+
 ### Drivers
 
 | Change | Why | Where |
@@ -53,6 +77,7 @@ Everything the script does is logged to `/var/log/yoga-slim7-tuning.log`.
 
 ```bash
 sudo bash install.sh --keep-desktop   # leave dark style, dimming and idle times alone
+sudo bash install.sh --no-hibernate   # no swapfile change, no resume boot option
 sudo bash install.sh --no-lpmd        # do not install intel-lpmd
 ```
 
@@ -92,7 +117,6 @@ sudo yoga-power battery full      # charge to 100%
 
 - **The kernel drivers themselves.** Graphics, Wi-Fi, sound and SSD drivers are maintained by Intel and already default to their deepest power states on this chip. The savings are in the settings above, not in changing driver code.
 - **SSD link power states.** Forcing deeper states than the firmware sets up has caused freezes on this SSD family (WD SN740).
-- **Hibernation.** It would stop all drain during long sleeps, but it needs a large swap area and does not work with Secure Boot on. Decide after reading a week of `yoga-power sleep-log`.
 - **External USB devices.** Blanket USB power saving makes mice and keyboards lag.
 - **TLP.** It conflicts with `power-profiles-daemon`.
 
@@ -121,4 +145,4 @@ python3 dolby_to_easyeffects.py /path/to/dolby-tuning/DEV_0287_SUBSYS_17AA38D8_P
 sudo bash install.sh --undo
 ```
 
-This removes every file listed above and puts your previous desktop settings back. Packages stay installed. Reboot afterwards.
+This removes every file listed above and puts your previous desktop settings back. Closing the lid suspends again. Packages stay installed and the swapfile keeps its new size. Reboot afterwards.

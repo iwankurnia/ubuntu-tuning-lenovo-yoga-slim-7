@@ -9,6 +9,8 @@ PROC=$ROOT/proc
 CONFIG=$ROOT/etc/yoga-power.conf
 SLEEP_LOG=$ROOT/var/log/yoga-sleep.log
 AUDIO_CONF=$ROOT/etc/modprobe.d/yoga-slim7-audio.conf
+LID_CONF=$ROOT/etc/systemd/logind.conf.d/90-yoga-slim7-lid.conf
+SLEEP_CONF=$ROOT/etc/systemd/sleep.conf.d/90-yoga-slim7.conf
 
 usage() {
     cat <<'EOF'
@@ -21,6 +23,12 @@ Usage: yoga-power <command>
   battery conserve    stop charging at about 80% (better battery lifespan)  [sudo]
   battery full        charge to 100%                                        [sudo]
   sleep-log [N]       show the last N suspend reports (default 10)
+  hibernate-test      hibernate once, to check that the laptop resumes      [sudo]
+  lid status          show what closing the lid does
+  lid hibernate       closing the lid hibernates (zero drain, slower wake)  [sudo]
+  lid suspend         closing the lid suspends (Ubuntu's default)           [sudo]
+  lid suspend-then-hibernate
+                      suspend first, hibernate after 30 minutes             [sudo]
 
 Settings for "apply" live in /etc/yoga-power.conf. "apply" runs by itself at
 boot, after resume, and whenever the charger is plugged in or pulled out.
@@ -197,6 +205,94 @@ measure() {
 }
 
 # ---------------------------------------------------------------------------
+# Hibernation and the lid.
+
+# Prints one line per reason hibernation cannot work yet; prints nothing when it can.
+hibernate_problems() {
+    local lock=$SYS/kernel/security/lockdown mem swap
+    grep -qw disk "$SYS/power/state" 2>/dev/null \
+        || echo "this kernel does not offer hibernation"
+    if [ -r "$lock" ] && ! grep -q '\[none\]' "$lock"; then
+        echo "Secure Boot is on; switch it off in the BIOS setup (F2 at power-on), then run install.sh again"
+    fi
+    case "$(cat "$SYS/power/resume" 2>/dev/null)" in
+        ''|0:0) echo "no resume location is set; run install.sh (without --no-hibernate) and reboot" ;;
+    esac
+    mem=$(awk '/^MemTotal:/ { print $2 }' "$PROC/meminfo" 2>/dev/null)
+    swap=$(awk '/^SwapTotal:/ { print $2 }' "$PROC/meminfo" 2>/dev/null)
+    if [ -n "$mem" ] && [ -n "$swap" ] && [ "$swap" -lt "$mem" ]; then
+        echo "swap ($((swap / 1048576)) GiB) is smaller than the memory ($((mem / 1048576)) GiB); run install.sh again"
+    fi
+}
+
+hibernate_test() {
+    need_root hibernate-test
+    local problems
+    problems=$(hibernate_problems)
+    if [ -n "$problems" ]; then
+        echo "Hibernation is not ready:" >&2
+        echo "$problems" | sed 's/^/  - /' >&2
+        exit 1
+    fi
+    cat <<'EOF'
+Hibernation test. Save your work first: if resuming fails, open documents are lost.
+
+The laptop will write its memory to the SSD and power off completely.
+Then press the power button. The test passed if this terminal and your
+windows come back exactly as they are now. If it did, run:
+
+    sudo yoga-power lid hibernate
+
+Hibernating in 10 seconds (Ctrl+C to cancel)...
+EOF
+    sleep 10
+    sync
+    systemctl hibernate
+}
+
+lid_status() {
+    local action
+    action=$(awk -F= '$1 == "HandleLidSwitch" { print $2 }' "$LID_CONF" 2>/dev/null)
+    echo "${action:-suspend (Ubuntu default)}"
+}
+
+lid_set() {
+    need_root lid "$1"
+    local problems
+    case "$1" in
+        suspend)
+            rm -f "$LID_CONF" "$SLEEP_CONF"
+            ;;
+        hibernate|suspend-then-hibernate)
+            problems=$(hibernate_problems)
+            if [ -n "$problems" ]; then
+                echo "Not changed, because hibernation is not ready:" >&2
+                echo "$problems" | sed 's/^/  - /' >&2
+                exit 1
+            fi
+            mkdir -p "$(dirname "$LID_CONF")"
+            cat > "$LID_CONF" <<EOF
+# Written by "yoga-power lid $1". Remove with: sudo yoga-power lid suspend
+[Login]
+HandleLidSwitch=$1
+HandleLidSwitchExternalPower=$1
+EOF
+            if [ "$1" = suspend-then-hibernate ]; then
+                mkdir -p "$(dirname "$SLEEP_CONF")"
+                printf '# Written by "yoga-power lid suspend-then-hibernate".\n[Sleep]\nHibernateDelaySec=30min\n' > "$SLEEP_CONF"
+            else
+                rm -f "$SLEEP_CONF"
+            fi
+            ;;
+        *) usage; exit 1 ;;
+    esac
+    # Ask the login manager to re-read its settings; a reboot does the same.
+    command -v systemctl >/dev/null && systemctl kill -s HUP systemd-logind 2>/dev/null
+    echo "closing the lid now does: $(lid_status)"
+    echo "(with an external monitor attached, the lid is still ignored)"
+}
+
+# ---------------------------------------------------------------------------
 service_state() {
     local u
     command -v systemctl >/dev/null || { echo "n/a"; return; }
@@ -261,6 +357,13 @@ status() {
 
     echo "Sleep"
     row "suspend mode" "$(read_file "$SYS/power/mem_sleep")"
+    p=$(hibernate_problems)
+    if [ -z "$p" ]; then
+        row "hibernation" "ready"
+    else
+        row "hibernation" "not ready: $(echo "$p" | head -n 1)"
+    fi
+    row "closing the lid" "$(lid_status)"
     if [ -r "$SLEEP_LOG" ]; then
         row "last suspend" "$(tail -n 1 "$SLEEP_LOG")"
     else
@@ -302,6 +405,13 @@ case "${1:-}" in
         ;;
     sleep-log)
         if [ -r "$SLEEP_LOG" ]; then tail -n "${2:-10}" "$SLEEP_LOG"; else echo "no suspend has been logged yet"; fi
+        ;;
+    hibernate-test) hibernate_test ;;
+    lid)
+        case "${2:-status}" in
+            status) echo "closing the lid does: $(lid_status)" ;;
+            *) lid_set "$2" ;;
+        esac
         ;;
     -h|--help|help|"") usage ;;
     *) usage; exit 1 ;;
