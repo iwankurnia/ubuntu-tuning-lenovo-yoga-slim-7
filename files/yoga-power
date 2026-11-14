@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+# yoga-power: battery-life settings for the Lenovo Yoga Slim 7 14IMH9 on Ubuntu.
+set -uo pipefail
+
+# YOGA_TEST_ROOT points the tool at a fake /sys and /proc tree; used only for testing.
+ROOT=${YOGA_TEST_ROOT:-}
+SYS=$ROOT/sys
+PROC=$ROOT/proc
+CONFIG=$ROOT/etc/yoga-power.conf
+SLEEP_LOG=$ROOT/var/log/yoga-sleep.log
+AUDIO_CONF=$ROOT/etc/modprobe.d/yoga-slim7-audio.conf
+
+usage() {
+    cat <<'EOF'
+Usage: yoga-power <command>
+
+  status              show the power, battery, sleep and speaker state
+  measure [SECONDS]   measure the real battery draw (default 60 s, on battery only)
+  apply               apply the battery or mains settings now               [sudo]
+  battery status      show the battery charge limit
+  battery conserve    stop charging at about 80% (better battery lifespan)  [sudo]
+  battery full        charge to 100%                                        [sudo]
+  sleep-log [N]       show the last N suspend reports (default 10)
+
+Settings for "apply" live in /etc/yoga-power.conf. "apply" runs by itself at
+boot, after resume, and whenever the charger is plugged in or pulled out.
+EOF
+}
+
+row() { printf '  %-22s %s\n' "$1" "$2"; }
+read_file() { cat "$1" 2>/dev/null || echo "n/a"; }
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || [ -n "$ROOT" ] || { echo "run with sudo:  sudo yoga-power $*" >&2; exit 1; }
+}
+
+load_config() {
+    ON_BATTERY_PROFILE=power-saver
+    ON_AC_PROFILE=balanced
+    BATTERY_NO_TURBO=0
+    BATTERY_WRITEBACK_SECS=60
+    AC_WRITEBACK_SECS=15
+    # shellcheck disable=SC1090
+    [ -r "$CONFIG" ] && . "$CONFIG"
+    return 0
+}
+
+bat_dir() {
+    local b
+    for b in "$SYS"/class/power_supply/BAT*; do
+        [ -d "$b" ] && { echo "$b"; return 0; }
+    done
+    return 1
+}
+
+# True when the charger is connected.
+on_ac() {
+    local f seen=0 b
+    for f in "$SYS"/class/power_supply/*/type; do
+        [ -r "$f" ] || continue
+        if [ "$(cat "$f")" = Mains ]; then
+            seen=1
+            [ "$(cat "${f%/type}/online" 2>/dev/null)" = 1 ] && return 0
+        fi
+    done
+    [ "$seen" -eq 1 ] && return 1
+    # No mains device reported: fall back to what the battery says.
+    b=$(bat_dir) || return 0
+    [ "$(cat "$b/status" 2>/dev/null)" != Discharging ]
+}
+
+# Battery draw in micro-watts (0 when the battery gives no reading).
+power_uw() {
+    if [ -r "$1/power_now" ]; then
+        cat "$1/power_now"
+    elif [ -r "$1/current_now" ] && [ -r "$1/voltage_now" ]; then
+        awk -v c="$(cat "$1/current_now")" -v v="$(cat "$1/voltage_now")" 'BEGIN { printf "%.0f\n", c * v / 1000000 }'
+    else
+        echo 0
+    fi
+}
+
+# Remaining battery energy in micro-watt-hours.
+energy_uwh() {
+    if [ -r "$1/energy_now" ]; then
+        cat "$1/energy_now"
+    elif [ -r "$1/charge_now" ] && [ -r "$1/voltage_now" ]; then
+        awk -v c="$(cat "$1/charge_now")" -v v="$(cat "$1/voltage_now")" 'BEGIN { printf "%.0f\n", c * v / 1000000 }'
+    else
+        echo 0
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Battery charge limit. Newer kernels expose it as a battery "charge type",
+# older ones as the ideapad conservation_mode switch. Support both.
+conservation_file() {
+    local f
+    for f in "$SYS"/bus/platform/drivers/ideapad_acpi/VPC2004:*/conservation_mode; do
+        [ -e "$f" ] && { echo "$f"; return 0; }
+    done
+    return 1
+}
+
+battery_limit_status() {
+    local b ct cm
+    b=$(bat_dir) || { echo "no battery found"; return; }
+    ct="$b/charge_types"
+    if [ -r "$ct" ]; then
+        case "$(cat "$ct")" in
+            *"[Long Life]"*) echo "conserve (stops at about 80%)" ;;
+            *"[Standard]"*)  echo "full (charges to 100%)" ;;
+            *)               cat "$ct" ;;
+        esac
+    elif cm=$(conservation_file); then
+        if [ "$(cat "$cm")" = 1 ]; then echo "conserve (stops at about 80%)"; else echo "full (charges to 100%)"; fi
+    else
+        echo "not available (ideapad-laptop driver not loaded?)"
+    fi
+}
+
+battery_limit_set() {
+    need_root battery "$1"
+    local b ct cm
+    b=$(bat_dir) || { echo "no battery found" >&2; exit 1; }
+    ct="$b/charge_types"
+    if [ -e "$ct" ] && grep -q 'Long Life' "$ct"; then
+        if [ "$1" = conserve ]; then echo 'Long Life' > "$ct"; else echo 'Standard' > "$ct"; fi
+    elif cm=$(conservation_file); then
+        if [ "$1" = conserve ]; then echo 1 > "$cm"; else echo 0 > "$cm"; fi
+    else
+        echo "this kernel exposes no charge limit control" >&2
+        exit 1
+    fi
+    echo "battery charge limit: $(battery_limit_status)"
+}
+
+# ---------------------------------------------------------------------------
+# Switch between the battery and the mains settings from /etc/yoga-power.conf.
+apply() {
+    need_root apply
+    load_config
+    local mode profile wb turbo i done_profile="unchanged"
+    if on_ac; then
+        mode=mains; profile=$ON_AC_PROFILE; wb=$AC_WRITEBACK_SECS; turbo=0
+    else
+        mode=battery; profile=$ON_BATTERY_PROFILE; wb=$BATTERY_WRITEBACK_SECS; turbo=1
+    fi
+
+    # Power profile (CPU energy preference and Lenovo's firmware power limits).
+    if [ -n "$profile" ] && command -v powerprofilesctl >/dev/null; then
+        for i in 1 2 3 4 5; do
+            if powerprofilesctl set "$profile" 2>/dev/null; then done_profile=$profile; break; fi
+            sleep 1
+        done
+    fi
+
+    # How long unwritten data may wait before the SSD is woken to store it.
+    case "$wb" in
+        ''|*[!0-9]*) ;;
+        *) echo $((wb * 100)) > "$PROC/sys/vm/dirty_writeback_centisecs" 2>/dev/null ;;
+    esac
+
+    # Turbo boost is only touched when the config asks for it to go off on battery.
+    if [ "$BATTERY_NO_TURBO" = 1 ] && [ -e "$SYS/devices/system/cpu/intel_pstate/no_turbo" ]; then
+        echo "$turbo" > "$SYS/devices/system/cpu/intel_pstate/no_turbo" 2>/dev/null
+    fi
+
+    local msg="on $mode: profile $done_profile, disk flush every ${wb}s"
+    command -v logger >/dev/null && logger -t yoga-power "$msg"
+    echo "$msg"
+}
+
+# ---------------------------------------------------------------------------
+measure() {
+    local secs=${1:-60} b n=0 sum=0 p end
+    case "$secs" in ''|*[!0-9]*) usage; exit 1 ;; esac
+    b=$(bat_dir) || { echo "no battery found" >&2; exit 1; }
+    if on_ac; then
+        echo "Unplug the charger first: on mains power the battery reading says nothing about usage." >&2
+        exit 1
+    fi
+    echo "Measuring battery draw for ${secs}s. Leave the laptop doing whatever you want to measure."
+    end=$(( $(date +%s) + secs ))
+    while :; do
+        p=$(power_uw "$b")
+        if [ "$p" -gt 0 ] 2>/dev/null; then sum=$((sum + p)); n=$((n + 1)); fi
+        [ "$(date +%s)" -ge "$end" ] && break
+        sleep 5
+    done
+    [ "$n" -gt 0 ] || { echo "the battery reported no power reading" >&2; exit 1; }
+    awk -v s="$sum" -v n="$n" -v e="$(energy_uwh "$b")" 'BEGIN {
+        w = s / n / 1000000
+        printf "average draw: %.2f W (%d samples)\n", w, n
+        if (w > 0 && e > 0) printf "the remaining charge lasts about %.1f hours at this rate\n", e / 1000000 / w
+    }'
+}
+
+# ---------------------------------------------------------------------------
+service_state() {
+    local u
+    command -v systemctl >/dev/null || { echo "n/a"; return; }
+    for u in "$@"; do
+        [ "$(systemctl is-active "$u" 2>/dev/null)" = active ] && { echo "active"; return; }
+    done
+    echo "not running"
+}
+
+service_enabled() {
+    command -v systemctl >/dev/null || { echo "n/a"; return; }
+    if [ "$(systemctl is-enabled "$1" 2>/dev/null)" = enabled ]; then echo "on"; else echo "off"; fi
+}
+
+status() {
+    local b f auto=0 on=0 card ifc p
+    load_config
+
+    echo "Machine"
+    row "model" "$(read_file "$SYS/class/dmi/id/product_version") ($(read_file "$SYS/class/dmi/id/product_name"))"
+    row "kernel" "$(uname -r)"
+
+    echo "Power"
+    if on_ac; then row "power source" "mains"; else row "power source" "battery"; fi
+    row "auto switching" "$(service_enabled yoga-power-auto.service) (battery: ${ON_BATTERY_PROFILE:-none}, mains: ${ON_AC_PROFILE:-none})"
+    if command -v powerprofilesctl >/dev/null; then
+        row "power profile" "$(powerprofilesctl get 2>/dev/null || echo n/a)"
+    fi
+    row "platform profile" "$(read_file "$SYS/firmware/acpi/platform_profile")"
+    row "CPU energy preference" "$(read_file "$SYS/devices/system/cpu/cpu0/cpufreq/energy_performance_preference")"
+    case "$(read_file "$SYS/devices/system/cpu/intel_pstate/no_turbo")" in
+        0) row "turbo boost" "on" ;;
+        1) row "turbo boost" "off" ;;
+    esac
+    f=$(read_file "$PROC/sys/vm/dirty_writeback_centisecs")
+    case "$f" in *[!0-9]*) ;; *) row "disk flush interval" "$((f / 100)) s" ;; esac
+    row "thermald" "$(service_state thermald.service)"
+    row "power-profiles-daemon" "$(service_state power-profiles-daemon.service)"
+    row "intel-lpmd" "$(service_state intel_lpmd.service intel-lpmd.service)"
+    for f in "$SYS"/bus/pci/devices/*/power/control; do
+        [ -r "$f" ] || continue
+        if [ "$(cat "$f")" = auto ]; then auto=$((auto + 1)); else on=$((on + 1)); fi
+    done
+    row "PCI runtime PM" "$auto devices allowed to sleep, $on always on"
+    for f in "$SYS"/class/net/*/phy80211; do
+        [ -e "$f" ] || continue
+        ifc=$(basename "$(dirname "$f")")
+        if command -v iw >/dev/null; then
+            row "Wi-Fi power save" "$ifc: $(iw dev "$ifc" get power_save 2>/dev/null | awk '{print $NF}')"
+        fi
+    done
+
+    echo "Battery"
+    if b=$(bat_dir); then
+        row "charge" "$(read_file "$b/capacity")% ($(read_file "$b/status"))"
+        p=$(power_uw "$b")
+        row "draw right now" "$(awk -v p="$p" 'BEGIN { printf "%.1f W", p / 1000000 }')"
+        row "charge limit" "$(battery_limit_status)"
+    else
+        row "battery" "not found"
+    fi
+
+    echo "Sleep"
+    row "suspend mode" "$(read_file "$SYS/power/mem_sleep")"
+    if [ -r "$SLEEP_LOG" ]; then
+        row "last suspend" "$(tail -n 1 "$SLEEP_LOG")"
+    else
+        row "last suspend" "none logged yet"
+    fi
+
+    echo "Sound"
+    if [ -f "$AUDIO_CONF" ]; then row "woofer fix file" "present"; else row "woofer fix file" "absent"; fi
+    card=""
+    for f in "$PROC"/asound/card*/codec#*; do
+        [ -r "$f" ] || continue
+        if grep -q 'ALC287' "$f"; then
+            card=${f#"$PROC"/asound/card}
+            card=${card%%/*}
+            break
+        fi
+    done
+    if [ -n "$card" ] && command -v amixer >/dev/null; then
+        if amixer -c "$card" scontrols 2>/dev/null | grep -q 'Bass Speaker'; then
+            row "woofers" "routed (Bass Speaker control exists)"
+        else
+            row "woofers" "NOT routed yet (reboot after install; if still missing, see README)"
+        fi
+    else
+        row "woofers" "could not check (ALC287 codec or amixer not found)"
+    fi
+}
+
+case "${1:-}" in
+    status) status ;;
+    measure) measure "${2:-60}" ;;
+    apply) apply ;;
+    battery)
+        case "${2:-status}" in
+            status) echo "battery charge limit: $(battery_limit_status)" ;;
+            conserve|full) battery_limit_set "$2" ;;
+            *) usage; exit 1 ;;
+        esac
+        ;;
+    sleep-log)
+        if [ -r "$SLEEP_LOG" ]; then tail -n "${2:-10}" "$SLEEP_LOG"; else echo "no suspend has been logged yet"; fi
+        ;;
+    -h|--help|help|"") usage ;;
+    *) usage; exit 1 ;;
+esac

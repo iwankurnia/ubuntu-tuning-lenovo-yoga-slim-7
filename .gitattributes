@@ -1,0 +1,3 @@
+# Scripts run on Ubuntu: keep LF line endings even when checked out on Windows.
+* text=auto eol=lf
+*.xml text eol=lf
