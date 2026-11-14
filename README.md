@@ -128,7 +128,8 @@ sudo yoga-power battery full      # charge to 100%
 The woofer fix makes all four speakers play. On top of that, the script rebuilds the sound profile Windows applies:
 
 - `dolby-tuning/` holds this laptop's own Dolby tuning file, copied from its Windows driver.
-- The script downloads [speaker-tuning-to-easyeffects](https://github.com/antoinecellerier/speaker-tuning-to-easyeffects) (pinned to `v2026.10.1`) into `/opt/yoga-slim7` and runs its `dolby_to_pipewire.py` as you.
+- The script downloads [speaker-tuning-to-easyeffects](https://github.com/antoinecellerier/speaker-tuning-to-easyeffects) release `v2026.10.1` into `/opt/yoga-slim7` and runs its `dolby_to_pipewire.py` as you, never as root.
+- The download is checked against a fixed commit hash (`2838efda3e5b…`). If it is anything else, it is deleted and not run. To move to a newer release, change `SPEAKER_TOOL_TAG` and `SPEAKER_TOOL_COMMIT` in `install.sh` together.
 - The result is a PipeWire filter in `~/.config/pipewire/pipewire.conf.d/` that loads every time sound starts. No extra application has to run.
 
 The sound cuts out for a moment while it installs. Judge the result after the reboot, when the woofers are active.

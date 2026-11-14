@@ -40,6 +40,7 @@ TUNING_XML_NAME=DEV_0287_SUBSYS_17AA38D8_PCI_SUBSYS_383917AA.xml
 SPEAKER_TOOL_DIR=$OPT_DIR/speaker-tuning-to-easyeffects
 SPEAKER_TOOL_REPO=https://github.com/antoinecellerier/speaker-tuning-to-easyeffects.git
 SPEAKER_TOOL_TAG=v2026.10.1
+SPEAKER_TOOL_COMMIT=2838efda3e5bcac4002ec91c78a43a66f8ada878      # what that tag pointed at on 2026-11-15
 SPEAKER_PACKAGES=(git python3-numpy python3-scipy python3-rich lsp-plugins-lv2 calf-plugins lilv-utils)
 
 # Face login (Howdy 3, from its author's PPA; it is not in the Ubuntu archive)
@@ -557,6 +558,12 @@ apt_install_each() {
     return "$failed"
 }
 
+# True when the converter on disk is exactly the pinned commit with no changed files.
+speaker_tool_verified() {
+    [ "$(git -C "$SPEAKER_TOOL_DIR" rev-parse HEAD 2>/dev/null)" = "$SPEAKER_TOOL_COMMIT" ] \
+        && [ -z "$(git -C "$SPEAKER_TOOL_DIR" status --porcelain 2>/dev/null)" ]
+}
+
 speaker_filter_present() {
     ls "$DESK_HOME"/.config/pipewire/pipewire.conf.d/*[Dd]olby* >/dev/null 2>&1
 }
@@ -592,8 +599,15 @@ tune_speaker_sound() {
             warn "could not download the converter ($SPEAKER_TOOL_REPO)"
             return
         fi
-        ok "converter $SPEAKER_TOOL_TAG downloaded to $SPEAKER_TOOL_DIR"
     fi
+    # A release tag can be moved to different code later; the commit hash cannot.
+    # Nothing from the download is run unless it is exactly the reviewed commit.
+    if ! speaker_tool_verified; then
+        rm -rf "$SPEAKER_TOOL_DIR"
+        warn "the downloaded converter is not the expected commit ($SPEAKER_TOOL_COMMIT); it was deleted and not run"
+        return
+    fi
+    ok "converter $SPEAKER_TOOL_TAG verified (commit ${SPEAKER_TOOL_COMMIT:0:12}) in $SPEAKER_TOOL_DIR"
 
     # The converter refuses to run as root, so it runs as you. It restarts
     # PipeWire, which cuts the sound for a moment.
@@ -606,6 +620,10 @@ tune_speaker_sound() {
 
 remove_speaker_sound() {
     [ -f "$SPEAKER_TOOL_DIR/dolby_to_pipewire.py" ] || return 0
+    if ! speaker_tool_verified; then
+        warn "the converter in $SPEAKER_TOOL_DIR is not the expected commit, so it was not run. Remove the sound profile by deleting the Dolby files in ~/.config/pipewire/pipewire.conf.d/"
+        return 1
+    fi
     if find_desktop_user "$(cat "$GS_USER_FILE" 2>/dev/null)"; then
         as_user sh -c 'cd "$HOME" && python3 "$1" --uninstall --yes' sh "$SPEAKER_TOOL_DIR/dolby_to_pipewire.py" </dev/null \
             && ok "sound profile removed" || warn "could not remove the sound profile"
