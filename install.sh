@@ -102,7 +102,7 @@ Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-spe
   --no-speaker-tuning  fix the woofers only; do not add the Dolby sound profile
   --no-face-login      do not install Howdy face login
   --no-claude          do not install Claude Desktop and the Claude Code CLI
-  --no-lpmd           do not install intel-lpmd (Intel's workload-aware CPU daemon)
+  --no-lpmd            do not install intel-lpmd (Intel's workload-aware CPU daemon)
   --force              run even if this is not a Yoga Slim 7 14IMH9 (83CV)
 EOF
 }
