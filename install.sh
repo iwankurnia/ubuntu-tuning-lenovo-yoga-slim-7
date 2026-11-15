@@ -648,6 +648,11 @@ EOF
         ok "wrote $CONFIG"
     fi
 
+    # It must start after power-profiles-daemon, and that daemon only starts
+    # after multi-user.target. So this unit belongs to graphical.target: hung
+    # on multi-user.target it forms a loop (multi-user waits for this unit,
+    # this unit for the daemon, the daemon for multi-user), and systemd breaks
+    # the loop by not starting this unit at boot at all.
     cat > "$AUTO_UNIT" <<EOF
 [Unit]
 Description=Apply Yoga Slim 7 battery or mains power settings
@@ -658,10 +663,11 @@ Type=oneshot
 ExecStart=$HELPER apply
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target
 EOF
     systemctl daemon-reload
-    if systemctl enable yoga-power-auto.service >/dev/null 2>&1 && systemctl start yoga-power-auto.service; then
+    # "reenable" also removes the link an earlier version left under multi-user.target.
+    if systemctl reenable yoga-power-auto.service >/dev/null 2>&1 && systemctl start yoga-power-auto.service; then
         ok "yoga-power-auto.service enabled and run once"
     else
         warn "could not start yoga-power-auto.service (see: journalctl -u yoga-power-auto)"
