@@ -33,6 +33,7 @@ LID_CONF=/etc/systemd/logind.conf.d/90-yoga-slim7-lid.conf     # written by "yog
 SLEEP_CONF=/etc/systemd/sleep.conf.d/90-yoga-slim7.conf        # written by "yoga-power lid"
 HIB_SWAP=""
 HIB_SWAP_TYPE=""
+SWAP_PERCENT=150       # size of the swapfile, as a percentage of the RAM
 
 # Speaker sound tuning (Dolby profile rebuilt as a PipeWire filter)
 OPT_DIR=/opt/yoga-slim7
@@ -370,57 +371,79 @@ EOF
 
 # ---------------------------------------------------------------------------
 # Hibernation writes the whole memory to swap and powers off, so it needs a
-# swap area at least as large as the RAM and a boot option that tells the
+# swap area larger than the RAM and a boot option that tells the
 # kernel where to find the saved image.
 
-# Finds a swap area big enough for a hibernation image. If there is none, the
+# Finds a swap area of at least the wanted size. If there is none, the
 # swapfile is replaced by a larger one (or /swap.img is created).
 # Sets HIB_SWAP and HIB_SWAP_TYPE; returns non-zero after a WARN on failure.
+make_swapfile() {
+    # make_swapfile PATH SIZE_GIB
+    rm -f "$1"
+    fallocate -l "${2}G" "$1" && chmod 600 "$1" && mkswap -q "$1" >/dev/null
+}
+
 ensure_hibernate_swap() {
-    local mem_bytes=$1 need_gib=$2 name type size file=""
+    local need_gib=$1 name type size file="" replacing=0
+    # A swap area reports slightly less than the size of its file (one header page).
+    local need_bytes=$(( need_gib * 1073741824 - 1048576 ))
     while read -r name type size; do
         [ -n "$name" ] || continue
-        if [ "$size" -ge "$mem_bytes" ]; then
+        if [ "$size" -ge "$need_bytes" ]; then
             HIB_SWAP=$name
             HIB_SWAP_TYPE=$type
-            skip "$name is already large enough ($((size / 1073741824)) GiB)"
+            skip "$name is already large enough ($(( (size + 1048576) / 1073741824 )) GiB)"
             return 0
         fi
         [ "$type" = file ] && [ -z "$file" ] && file=$name
     done < <(swapon --show=NAME,TYPE,SIZE --bytes --noheadings 2>/dev/null)
 
-    [ -n "$file" ] || file=/swap.img
-    local dir new="$file.new" avail_kib fstype
+    if [ -n "$file" ]; then replacing=1; else file=/swap.img; fi
+    local dir tmp="$file.tmp" avail_kib fstype space_gib
     dir=$(dirname "$file")
     fstype=$(findmnt -no FSTYPE -T "$dir" 2>/dev/null)
     if [ "$fstype" != ext4 ]; then
         warn "$dir is on $fstype; this script only builds a hibernation swapfile on ext4"
         return 1
     fi
-    # The new file is written next to the old one first, and 10 GiB must stay free afterwards.
+    # Replacing a swapfile needs room for a temporary one as well, and 10 GiB must stay free.
+    space_gib=$(( need_gib * (replacing + 1) + 10 ))
     avail_kib=$(df --output=avail -k "$dir" | tail -n 1 | tr -d ' ')
-    if [ "$avail_kib" -lt $(( (need_gib + 10) * 1048576 )) ]; then
-        warn "not enough free disk space for a ${need_gib} GiB swapfile (free: $((avail_kib / 1048576)) GiB)"
+    if [ "$avail_kib" -lt $(( space_gib * 1048576 )) ]; then
+        warn "not enough free disk space for a ${need_gib} GiB swapfile (free: $((avail_kib / 1048576)) GiB, needed while it is built: $space_gib GiB)"
         return 1
     fi
 
-    rm -f "$new"
-    if ! fallocate -l "${need_gib}G" "$new" || ! chmod 600 "$new" || ! mkswap -q "$new" >/dev/null; then
-        rm -f "$new"
-        warn "could not create ${need_gib} GiB swapfile $new; the existing swap was left untouched"
-        return 1
-    fi
-    if swapon --show=NAME --noheadings 2>/dev/null | grep -qxF "$file"; then
+    if [ "$replacing" -eq 1 ]; then
+        # Whatever is in swap right now has to go somewhere while the old file
+        # is switched off. A temporary swapfile takes it, so this works even
+        # when memory is nearly full.
+        if ! make_swapfile "$tmp" "$need_gib" || ! swapon -p 1 "$tmp"; then
+            rm -f "$tmp"
+            warn "could not create a temporary swapfile; the existing swap was left untouched"
+            return 1
+        fi
         if ! swapoff "$file"; then
-            rm -f "$new"
-            warn "could not switch off $file (memory too full?). Close some applications and run this script again."
+            swapoff "$tmp" 2>/dev/null
+            rm -f "$tmp"
+            warn "could not switch off $file; the existing swap was left untouched"
             return 1
         fi
     fi
-    mv -f "$new" "$file"
-    if ! swapon -p 100 "$file"; then
-        warn "could not switch on the new swapfile $file"
+    if ! make_swapfile "$file" "$need_gib" || ! swapon -p 100 "$file"; then
+        if [ "$replacing" -eq 1 ]; then
+            warn "could not create the new $file. Swap is running from $tmp until the next reboot; run this script again before rebooting."
+        else
+            warn "could not create ${need_gib} GiB swapfile $file"
+        fi
         return 1
+    fi
+    if [ "$replacing" -eq 1 ]; then
+        if swapoff "$tmp"; then
+            rm -f "$tmp"
+        else
+            warn "the temporary swapfile $tmp is still in use; it is harmless, delete it after the next reboot"
+        fi
     fi
 
     # Make it permanent, with the highest priority so hibernation always picks it.
@@ -454,12 +477,13 @@ setup_hibernate() {
         return
     fi
 
-    local mem_kib mem_bytes need_gib uuid offset params
+    local mem_kib need_gib uuid offset params
     mem_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
-    mem_bytes=$((mem_kib * 1024))
-    need_gib=$(( (mem_kib + 1048575) / 1048576 + 1 ))      # RAM rounded up, plus 1 GiB of headroom
+    # SWAP_PERCENT of the RAM, rounded up to a whole GiB. The image needs up to
+    # the RAM size; the rest is room for what is already swapped out.
+    need_gib=$(( (mem_kib * SWAP_PERCENT / 100 + 1048575) / 1048576 ))
 
-    ensure_hibernate_swap "$mem_bytes" "$need_gib" || return
+    ensure_hibernate_swap "$need_gib" || return
 
     if [ "$HIB_SWAP_TYPE" = file ]; then
         uuid=$(findmnt -no UUID -T "$HIB_SWAP" 2>/dev/null)
@@ -469,6 +493,13 @@ setup_hibernate() {
             ''|*[!0-9]*) warn "could not read where $HIB_SWAP starts on the disk; hibernation was not set up"; return ;;
         esac
         params="resume=UUID=$uuid resume_offset=$offset"
+        # Tell the running kernel as well. Otherwise a swapfile that was just
+        # replaced could not be hibernated to until the next reboot, and closing
+        # the lid would leave the laptop running.
+        if [ -w /sys/power/resume_offset ]; then
+            echo "$offset" > /sys/power/resume_offset 2>/dev/null \
+                || warn "could not update the running kernel; reboot before closing the lid"
+        fi
     else
         uuid=$(blkid -s UUID -o value "$HIB_SWAP" 2>/dev/null)
         params="resume=UUID=$uuid"

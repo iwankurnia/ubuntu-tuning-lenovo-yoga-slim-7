@@ -58,7 +58,7 @@ First run on an 83CV with Ubuntu 26.10 (kernel 7.3.0), 2026-11-15:
 
 | Change | Why | Where |
 |---|---|---|
-| Swapfile enlarged to the RAM size plus 1 GiB (17 GiB here) | Hibernation writes the whole memory to swap. If an existing swap area is already big enough it is used as it is; otherwise the swapfile is replaced, or `/swap.img` is created. | `/swap.img`, `/etc/fstab` (old copy in `/etc/fstab.yoga-slim7.bak`) |
+| Swapfile sized at 150% of the RAM (22 GiB here) | Hibernation writes the whole memory to swap, and needs room on top of that for what is already swapped out. If an existing swap area is already that big it is used as it is; otherwise the swapfile is replaced, or `/swap.img` is created. While it is replaced a temporary swapfile takes over, so it works with memory nearly full. | `/swap.img`, `/etc/fstab` (old copy in `/etc/fstab.yoga-slim7.bak`) |
 | Resume boot option | Tells the kernel where the saved image is. | `/etc/default/grub.d/91-yoga-slim7-hibernate.cfg`, `/etc/initramfs-tools/conf.d/yoga-slim7-resume` |
 | Lid action | Set by you with `yoga-power lid ...` after the test passes. | `/etc/systemd/logind.conf.d/90-yoga-slim7-lid.conf` |
 
@@ -75,6 +75,7 @@ sudo yoga-power lid suspend                # back to Ubuntu's default
 
 With an external monitor attached, closing the lid is still ignored, as on a stock Ubuntu.
 Run `install.sh` again if you ever recreate the swapfile: its position on the disk is part of the boot option.
+To use a different size, change `SWAP_PERCENT` at the top of `install.sh`; the script only ever enlarges the swapfile.
 
 ### Drivers
 
