@@ -107,6 +107,9 @@ KEEP_KEYRING=0
 KEYRING_NAME=Default_keyring
 KEYRING_BACKUP=$STATE_DIR/keyring-default.before
 KEEP_DESKTOP=0
+KEEP_FONTS=0
+FONTS_READY=0
+FONT_CONF_NAME=45-yoga-slim7-fonts.conf
 WARNINGS=0
 DESK_USER=""
 DESK_UID=""
@@ -121,13 +124,14 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-zswap]
+Usage: sudo bash install.sh [--undo] [--keep-desktop] [--keep-fonts] [--no-hibernate] [--no-zswap]
                             [--no-speaker-tuning] [--no-face-login] [--no-claude]
                             [--keep-keyring] [--no-lpmd] [--force]
 
   --undo               remove what this script set up and put the desktop options back
                        (ordinary packages and the enlarged swapfile are left in place)
   --keep-desktop       do not change desktop options (dark style, dimming, idle times)
+  --keep-fonts         do not change fonts or text smoothing
   --no-hibernate       do not set up hibernation (no swapfile change, no resume boot option)
   --no-zswap           do not switch on compressed swap (zswap)
   --no-speaker-tuning  fix the woofers only; do not add the Dolby sound profile
@@ -144,6 +148,7 @@ for arg in "$@"; do
     case "$arg" in
         --undo) MODE=undo ;;
         --keep-desktop) KEEP_DESKTOP=1 ;;
+        --keep-fonts) KEEP_FONTS=1 ;;
         --no-hibernate) WITH_HIBERNATE=0 ;;
         --no-zswap) WITH_ZSWAP=0 ;;
         --no-speaker-tuning) WITH_SPEAKER_TUNING=0 ;;
@@ -663,6 +668,92 @@ tune_desktop() {
     gs_set org.gnome.desktop.session idle-delay "uint32 180" # screen off after 3 idle minutes
     gs_set $power sleep-inactive-battery-type "'suspend'"    # on battery: suspend when idle...
     gs_set $power sleep-inactive-battery-timeout 600         # ...for 10 minutes
+}
+
+# ---------------------------------------------------------------------------
+# Fonts. Coming from Windows, Ubuntu's text looks unfamiliar and, in browsers
+# and Electron applications on this OLED panel, slightly coloured at the edges.
+#  - Selawik (Microsoft's open stand-in for Segoe UI, shipped in this kit)
+#    becomes the interface font and stands in wherever Segoe UI is asked for.
+#  - Consolas becomes the code and terminal font when it is installed.
+#  - Smoothing changes from colour (made for LCD stripes) to plain greyscale.
+# Everything is per user: files go into your home folder, written as you.
+
+# user_copy SOURCE DEST: installs a file into the user's home as the user.
+# Returns 0 when written, 1 when it was already identical, 2 on failure.
+user_copy() {
+    [ ! -L "$2" ] || return 2
+    if as_user test -f "$2" && as_user cmp -s - "$2" < "$1"; then
+        return 1
+    fi
+    as_user sh -c 'umask 022; cat > "$1"' sh "$2" < "$1" || return 2
+}
+
+setup_fonts() {
+    say "Fonts (Windows-like, cleaner on the OLED panel)"
+    if [ "$KEEP_FONTS" -eq 1 ]; then
+        skip "left alone (--keep-fonts)"
+        return
+    fi
+    if ! find_desktop_user; then
+        warn "no desktop session found. Run this script with sudo from a terminal inside GNOME to set up the fonts."
+        return
+    fi
+    local src="$KIT_DIR/files/fonts" font_dir="$DESK_HOME/.local/share/fonts/selawik"
+    local conf_dir="$DESK_HOME/.config/fontconfig/conf.d" f rc written=0
+    if [ ! -f "$src/selawik/selawk.ttf" ] || [ ! -f "$src/$FONT_CONF_NAME" ]; then
+        warn "the font files are missing from the kit (files/fonts)"
+        return
+    fi
+    for f in "$DESK_HOME/.local" "$DESK_HOME/.local/share" "$DESK_HOME/.local/share/fonts" "$font_dir" \
+             "$DESK_HOME/.config" "$DESK_HOME/.config/fontconfig" "$conf_dir"; do
+        if [ -L "$f" ]; then
+            warn "$f is a link; fonts left untouched"
+            return
+        fi
+    done
+    as_user mkdir -p "$font_dir" "$conf_dir" || { warn "could not create the font folders"; return; }
+
+    for f in "$src"/selawik/*.ttf "$src/selawik/LICENSE.txt"; do
+        user_copy "$f" "$font_dir/$(basename "$f")"; rc=$?
+        [ "$rc" -eq 0 ] && written=$((written + 1))
+        [ "$rc" -eq 2 ] && { warn "could not install $(basename "$f")"; return; }
+    done
+    user_copy "$src/$FONT_CONF_NAME" "$conf_dir/$FONT_CONF_NAME"; rc=$?
+    [ "$rc" -eq 0 ] && written=$((written + 1))
+    [ "$rc" -eq 2 ] && { warn "could not install $FONT_CONF_NAME"; return; }
+    if [ "$written" -gt 0 ]; then
+        as_user fc-cache -f "$DESK_HOME/.local/share/fonts" 2>/dev/null
+        ok "Selawik and the font rules installed in your home folder ($written file(s) written)"
+    else
+        skip "Selawik and the font rules (already in place)"
+    fi
+
+    mkdir -p "$STATE_DIR"
+    echo "$DESK_USER" > "$GS_USER_FILE"
+    local iface=org.gnome.desktop.interface
+    gs_set $iface font-name "'Selawik 11'"
+    gs_set $iface document-font-name "'Selawik 11'"
+    gs_set org.gnome.desktop.wm.preferences titlebar-font "'Selawik Semi-Bold 11'"
+    gs_set $iface font-antialiasing "'grayscale'"
+    if as_user fc-list Consolas 2>/dev/null | grep -q .; then
+        gs_set $iface monospace-font-name "'Consolas 12'"
+    else
+        skip "code font left as it is: Consolas is not installed. It comes with Microsoft's core fonts, which ask you to accept a licence: sudo apt install ttf-mscorefonts-installer, then run this script again."
+    fi
+    FONTS_READY=1
+}
+
+remove_fonts() {
+    local user home f
+    user=$(cat "$GS_USER_FILE" 2>/dev/null)
+    [ -n "$user" ] || user=${SUDO_USER:-}
+    [ -n "$user" ] && [ "$user" != root ] || return 0
+    home=$(getent passwd "$user" | cut -d: -f6)
+    f=$home/.config/fontconfig/conf.d/$FONT_CONF_NAME
+    [ -f "$f" ] && [ ! -L "$f" ] || return 0
+    sudo -u "$user" rm -f "$f" && ok "removed $f" || warn "could not remove $f"
+    echo "   note  the Selawik font files in $home/.local/share/fonts/selawik were kept; they are harmless"
 }
 
 # ---------------------------------------------------------------------------
@@ -1302,6 +1393,7 @@ undo() {
     remove_claude
     remove_face_login
     remove_speaker_sound
+    remove_fonts
     restore_desktop
     echo
     echo "Done. Packages were left installed, and the swapfile was left at its current size."
@@ -1323,6 +1415,7 @@ tune_boot
 install_tools
 setup_hibernate
 tune_desktop
+setup_fonts
 tune_speaker_sound
 setup_face_login
 setup_keyring
@@ -1347,4 +1440,7 @@ if [ "$FACE_LOGIN_READY" -eq 1 ]; then
 fi
 if [ "$CLAUDE_READY" -eq 1 ]; then
     echo "  -  open Claude from the application menu and sign in; in a terminal, run: claude"
+fi
+if [ "$FONTS_READY" -eq 1 ]; then
+    echo "  -  applications that were open keep their old fonts until you restart them"
 fi

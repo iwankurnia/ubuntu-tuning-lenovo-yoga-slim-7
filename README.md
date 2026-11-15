@@ -84,6 +84,15 @@ To use a different size, change `SWAP_PERCENT` at the top of `install.sh`; the s
 | Woofer routing | The kernel has no entry for this laptop's sound codec (17aa:38d8), so without this the speakers sound thin. | `/etc/modprobe.d/yoga-slim7-audio.conf` |
 | Sound firmware and Intel video decoder | Makes sure both are installed, so video playback uses the GPU, not the CPU. | packages |
 
+### Fonts
+
+| Change | Why | Where |
+|---|---|---|
+| Interface font: Selawik | Microsoft's open stand-in for Segoe UI, so menus and windows look as they did on Windows. Shipped inside this kit. | `~/.local/share/fonts/selawik`, your desktop settings |
+| Segoe UI requests answered by Selawik | Teams, Outlook, WhatsApp and GitHub ask for Segoe UI first; without this they fall back to Arial. | `~/.config/fontconfig/conf.d/45-yoga-slim7-fonts.conf` |
+| Code and terminal font: Consolas | The Visual Studio default. Only set when Consolas is installed. | your desktop settings |
+| Greyscale text smoothing | Ubuntu's colour smoothing is made for LCD stripes; on this OLED panel it puts coloured edges on letters in browsers and Electron applications. | both of the above |
+
 ### Tools
 
 | Tool | What it does | Where |
@@ -98,6 +107,7 @@ Everything the script does is logged to `/var/log/yoga-slim7-tuning.log`.
 
 ```bash
 sudo bash install.sh --keep-desktop   # leave dark style, dimming and idle times alone
+sudo bash install.sh --keep-fonts     # leave fonts and text smoothing alone
 sudo bash install.sh --no-hibernate   # no swapfile change, no resume boot option
 sudo bash install.sh --no-zswap       # do not switch on compressed swap
 sudo bash install.sh --no-speaker-tuning  # woofer fix only, no Dolby sound profile
@@ -160,6 +170,29 @@ The two ways to reach about 110% differ in what stays large:
 A 100% display scale is drawn pixel for pixel, which is the sharpest and the lightest on the graphics chip. At 125% GNOME draws larger and scales the picture down, which costs a little sharpness in older applications.
 
 With an external monitor connected, the display scale is left alone and only the text scaling is adjusted.
+
+## Fonts
+
+The script sets up the fonts for the person who ran `sudo`, in their home folder:
+
+- **Selawik** comes with the kit (`files/fonts/selawik`, version 1.01, identical to Microsoft's release, SIL Open Font License). It has no true italic; applications slant the regular shape instead.
+- **Consolas** is not in the kit, because it is Microsoft's property. It arrives with `ttf-mscorefonts-installer`, which asks you to accept Microsoft's licence, so the script does not install it for you. Without it, the code font stays as it is.
+- **Open applications keep their old fonts** until you restart them.
+
+Why a plain font substitution was not enough: browsers and Electron applications only accept a substitute font when it is the first choice after substitution. The rules file therefore uses `prefer`; an `accept` rule looks right in `fc-match` and is silently ignored by Brave, Teams and the rest.
+
+To see what an application will get:
+
+```bash
+fc-match "Segoe UI"      # Selawik
+fc-match monospace       # Consolas
+```
+
+If text looks too soft with greyscale smoothing and you want Ubuntu's colour smoothing back, remove the last two `<match>` blocks from the rules file and run:
+
+```bash
+gsettings set org.gnome.desktop.interface font-antialiasing rgba
+```
 
 ## Battery charge limit
 
@@ -296,4 +329,4 @@ Skip both with `--no-claude`.
 sudo bash install.sh --undo
 ```
 
-This removes every file listed above, the sound profile, Howdy (with its PPA) and both Claude packages (with their repositories; `~/.claude` is kept), and puts your previous desktop settings back. Closing the lid suspends again. Ordinary Ubuntu packages stay installed and the swapfile keeps its new size. Reboot afterwards.
+This removes every file listed above, the sound profile, Howdy (with its PPA) and both Claude packages (with their repositories; `~/.claude` is kept), the font rules (the Selawik files stay), and puts your previous desktop settings back, fonts included. Closing the lid suspends again. Ordinary Ubuntu packages stay installed and the swapfile keeps its new size. Reboot afterwards.
