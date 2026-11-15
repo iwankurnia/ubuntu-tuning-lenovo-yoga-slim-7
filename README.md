@@ -27,7 +27,7 @@ Two runs and a reboot on an 83CV with Ubuntu 26.10 (kernel 7.3.0) on 2026-11-15.
 |---|---|
 | Woofer fix | Works. The sound driver reports `picked fixup alc287-yoga9-bass-spk-pin`. |
 | Hibernation | Works. Hibernated and resumed twice; closing the lid hibernates. Secure Boot is off on this laptop. |
-| Automatic battery/mains switching | Works when the charger is plugged in or pulled out and after waking. It did **not** run at boot: the unit was tied to `multi-user.target`, which loops with `power-profiles-daemon`, so systemd dropped it. Now tied to `graphical.target`; not yet confirmed by a boot. |
+| Automatic battery/mains switching | Works when the charger is plugged in or pulled out and after waking. It did **not** run at boot: the unit was tied to `multi-user.target`, which loops with `power-profiles-daemon`, so systemd dropped it. Now tied to `graphical.target` and installed that way on the laptop; a boot has not confirmed it yet. |
 | Idle devices, Wi-Fi power save | Applied: 24 PCI devices allowed to sleep; camera and Bluetooth suspend when unused. |
 | Face login | Howdy 3.0.1 installed and a face enrolled. |
 | Password-less keyring | Works; applications save into it without a prompt. |

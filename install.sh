@@ -117,6 +117,7 @@ DESK_USER=""
 DESK_UID=""
 DESK_HOME=""
 FACE_LOGIN_READY=0
+NEED_REBOOT=0
 
 say()  { printf '\n== %s\n' "$*"; }
 ok()   { printf '   ok    %s\n' "$*"; }
@@ -239,6 +240,7 @@ fix_speakers() {
 $want
 EOF
     ok "wrote $AUDIO_CONF"
+    NEED_REBOOT=1
 
     if command -v update-initramfs >/dev/null; then
         update-initramfs -u >/dev/null && ok "initramfs updated" || warn "update-initramfs failed"
@@ -368,12 +370,21 @@ tune_boot() {
         skip "this install does not boot through GRUB, boot options not added"
         return
     fi
+    local word in_use=1
+    for word in $params; do
+        grep -qw -- "$word" /proc/cmdline || in_use=0
+    done
+    if [ "$in_use" -eq 1 ] && grep -qsF " $params\"" "$GRUB_DROPIN"; then
+        skip "boot options already in use: $params"
+        return
+    fi
     mkdir -p /etc/default/grub.d
     cat > "$GRUB_DROPIN" <<EOF
 # Yoga Slim 7 14IMH9 (written by yoga-slim7-ubuntu/install.sh).
 GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT $params"
 EOF
     if update-grub >/dev/null 2>&1; then
+        NEED_REBOOT=1
         ok "boot options set: $params (active after the next reboot)"
     else
         rm -f "$GRUB_DROPIN"
@@ -602,6 +613,7 @@ EOF
         update-initramfs -u -k all >/dev/null 2>&1 || warn "update-initramfs failed; resume from hibernation may not work"
     fi
     ok "boot option added: $params"
+    NEED_REBOOT=1
     if [ -f "$LID_CONF" ]; then
         ok "hibernation is set up; closing the lid keeps the action you chose ($(awk -F= '$1 == "HandleLidSwitch" { print $2 }' "$LID_CONF"))"
     else
@@ -1537,13 +1549,26 @@ if [ "$WARNINGS" -gt 0 ]; then
 else
     echo "Finished with no warnings. Log: $LOG"
 fi
-echo "Reboot now so the speaker fix and the boot options take effect. After the reboot:"
-echo "  1. sudo yoga-power hibernate-test   (check that hibernation really resumes)"
-echo "  2. sudo yoga-power lid hibernate    (only after step 1 worked: hibernate when the lid closes)"
-echo "  3. yoga-power measure               (on battery: the real power draw)"
-if [ "$FACE_LOGIN_READY" -eq 1 ]; then
-    echo "  4. sudo howdy add                   (look at the camera: saves your face)"
-    echo "  5. sudo -k true                     (should say \"Identified face\"; see README if it times out)"
+STEP=0
+step() { STEP=$((STEP + 1)); printf '  %d. %s\n' "$STEP" "$1"; }
+if [ "$NEED_REBOOT" -eq 1 ]; then
+    echo "Reboot now so that what changed in this run takes effect. After the reboot:"
+else
+    echo "Nothing in this run needs a reboot. Worth doing when you have a moment:"
+fi
+if [ "$WITH_HIBERNATE" -eq 1 ] && [ -f "$HIB_GRUB" ]; then
+    if [ ! -f "$LID_CONF" ]; then
+        step "sudo yoga-power hibernate-test   (check that hibernation really resumes)"
+        step "sudo yoga-power lid hibernate    (only after the test worked: hibernate when the lid closes)"
+    elif [ "$HIB_SWAP_REPLACED" -eq 1 ]; then
+        step "sudo yoga-power hibernate-test   (the swapfile was replaced: check once that hibernation still resumes)"
+    fi
+fi
+step "yoga-power measure               (on battery: the real power draw)"
+# Only when no face has been saved yet for the person who ran sudo.
+if [ "$FACE_LOGIN_READY" -eq 1 ] && [ ! -f "/etc/howdy/models/${SUDO_USER:-}.dat" ]; then
+    step "sudo howdy add                   (look at the camera: saves your face)"
+    step "sudo -k true                     (should say \"Identified face\"; see README if it times out)"
 fi
 if [ "$CLAUDE_READY" -eq 1 ]; then
     echo "  -  open Claude from the application menu and sign in; in a terminal, run: claude"
