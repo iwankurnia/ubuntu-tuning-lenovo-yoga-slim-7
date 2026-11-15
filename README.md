@@ -34,7 +34,7 @@ Two runs and a reboot on an 83CV with Ubuntu 26.10 (kernel 7.3.0) on 2026-11-15.
 | Claude Desktop 5.11492.5, Claude Code 2.1.311 | Installed and running. |
 | Speaker sound profile | Installed on the second run: PipeWire loads the `Dolby_Balanced` filter and attaches it to the speakers. It failed on the first run because `libspa-0.2-modules-extra` was missing; the script installs it now. It loads again after a reboot. How it sounds has not been judged. |
 | Compressed swap (zswap) | Works after the reboot: `zswap: loaded using pool lz4`. |
-| Swapfile at 150% of the RAM (22 GiB) | Works: the 16 GiB swapfile in use was replaced by a 22 GiB one, and the boot option, the running kernel and `/etc/fstab` all point at it. After the reboot the kernel was started with the new position. Hibernating to the new file has not been tested yet. |
+| Swapfile at 150% of the RAM (22 GiB) | Works: the 16 GiB swapfile in use was replaced by a 22 GiB one, and the boot option, the running kernel and `/etc/fstab` all point at it. After the reboot the kernel was started with the new position, and a hibernate and resume with the new file worked (39 s in all, windows restored). |
 | `yoga-scale` | Works: 110, 112, 120, `125x0.9` and `125x0.8` were all applied on the laptop. |
 | `--windows-fonts` | Tried on the laptop and rendered correctly in a test window; the owner went back to Ubuntu's fonts, so it is off by default. |
 | Plain suspend (S0ix) and idle battery draw | Not measured yet. |
