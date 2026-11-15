@@ -141,6 +141,7 @@ yoga-scale status      # what is set now
 yoga-scale 110         # 100% display x 1.10 text
 yoga-scale 120         # 100% display x 1.20 text
 yoga-scale 125         # back to plain 125%
+yoga-scale 125x0.9     # choose both parts: 125% display with text at 0.9 (about 112%)
 yoga-scale 120 --dry-run   # show the split and check GNOME accepts it, change nothing
 ```
 
@@ -148,6 +149,15 @@ It needs no `sudo`. How applications respond:
 
 - **Brave and Electron applications** (VS Code, Claude, Teams and the like) follow the combined size exactly.
 - **GNOME's own applications** scale their text, and the buttons and rows that hold it. Icons follow the display scale only, so at 110% or 120% they stay at their 100% size.
+
+The two ways to reach about 110% differ in what stays large:
+
+| Command | Icons, top bar, window buttons | Text |
+|---|---|---|
+| `yoga-scale 110` (100% display x 1.10 text) | small, at 100% | 110% |
+| `yoga-scale 125x0.9` (125% display x 0.90 text) | large, at 125% | about 112% |
+
+A 100% display scale is drawn pixel for pixel, which is the sharpest and the lightest on the graphics chip. At 125% GNOME draws larger and scales the picture down, which costs a little sharpness in older applications.
 
 With an external monitor connected, the display scale is left alone and only the text scaling is adjusted.
 

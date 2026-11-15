@@ -9,6 +9,9 @@ This command reaches any size in between by combining two settings:
 It picks the largest display scale that is not above the size you ask for and
 makes up the rest with text scaling. 120% becomes 100% display x 1.20 text.
 
+To choose both parts yourself, write them as DISPLAYxTEXT: 125x0.9 keeps the
+125% display scale (so icons and the top bar stay large) and shrinks the text.
+
 Browsers and Electron applications (Brave, VS Code, Claude, Teams, ...) follow
 the combined size exactly. GNOME's own applications scale their text and the
 controls that hold text; their icons follow the display scale only.
@@ -73,9 +76,12 @@ def show_status():
         print(f"  display scales GNOME offers here: {steps}")
 
 
-def apply(percent, dry_run):
-    if not MIN_PERCENT <= percent <= MAX_PERCENT:
+def apply(percent, dry_run, chosen=None):
+    """Sets PERCENT, or, when CHOSEN is (display percent, text scaling), exactly that pair."""
+    if chosen is None and not MIN_PERCENT <= percent <= MAX_PERCENT:
         sys.exit(f"choose a size between {MIN_PERCENT} and {MAX_PERCENT}")
+    if chosen is not None and not MIN_TEXT <= chosen[1] <= MAX_TEXT:
+        sys.exit(f"choose a text scaling between {MIN_TEXT} and {MAX_TEXT}")
     proxy = display_config()
     serial, logical, modes = read_state(proxy)
     settings = text_settings()
@@ -84,11 +90,11 @@ def apply(percent, dry_run):
         # Several screens: moving one changes where the others sit, so the
         # display scale is left alone and only the text scaling is adjusted.
         scale = next((lm[2] for lm in logical if lm[4]), logical[0][2])
-        text = round(percent / 100.0 / scale, 2)
+        text = chosen[1] if chosen else round(percent / 100.0 / scale, 2)
         if not MIN_TEXT <= text <= MAX_TEXT:
             sys.exit(f"{percent}% cannot be reached from the current {round(scale * 100)}% display scale")
         print(f"More than one screen is connected: the display scale stays at {round(scale * 100)}%.")
-        print(f"{percent}% = {round(scale * 100)}% display x {text:.2f} text")
+        print(f"{round(scale * text * 100)}% = {round(scale * 100)}% display x {text:.2f} text")
         if not dry_run:
             settings.set_double("text-scaling-factor", text)
             Gio.Settings.sync()
@@ -99,8 +105,15 @@ def apply(percent, dry_run):
     if connector not in modes:
         sys.exit(f"could not read the current mode of {connector}")
     mode_id, supported = modes[connector]
-    display, text = plan(percent, supported)
-    print(f"{percent}% = {round(display * 100)}% display x {text:.2f} text")
+    if chosen:
+        display = min(supported, key=lambda s: abs(s - chosen[0] / 100.0))
+        if abs(display - chosen[0] / 100.0) > 0.02:
+            offered = ", ".join(f"{round(s * 100)}" for s in supported)
+            sys.exit(f"GNOME has no {chosen[0]:g}% display scale here; it offers {offered}")
+        text = chosen[1]
+    else:
+        display, text = plan(percent, supported)
+    print(f"{round(display * text * 100)}% = {round(display * 100)}% display x {text:.2f} text")
 
     if abs(display - old_scale) > 0.001:
         config = GLib.Variant(
@@ -124,10 +137,11 @@ def main():
     parser = argparse.ArgumentParser(
         prog="yoga-scale",
         description="In-between screen scaling for GNOME (display scale x text scaling).",
-        epilog="Examples:  yoga-scale 110   yoga-scale 120   yoga-scale 125   yoga-scale status",
+        epilog="Examples:  yoga-scale 110   yoga-scale 120   yoga-scale 125x0.9   yoga-scale status",
     )
     parser.add_argument("size", nargs="?", default="status",
-                        help="a percentage such as 110 or 120, or 'status' (the default)")
+                        help="a percentage such as 110 or 120; or DISPLAYxTEXT such as 125x0.9 to choose "
+                             "both parts yourself (125%% display with text at 0.9); or 'status' (the default)")
     parser.add_argument("--dry-run", action="store_true",
                         help="show what would be set and check that GNOME accepts it, without changing anything")
     args = parser.parse_args()
@@ -136,6 +150,10 @@ def main():
         show_status()
         return
     try:
+        if "x" in args.size.lower():
+            display_part, text_part = args.size.lower().split("x", 1)
+            apply(None, args.dry_run, chosen=(float(display_part.rstrip("%")), float(text_part)))
+            return
         percent = float(args.size.rstrip("%"))
     except ValueError:
         parser.error(f"not a size: {args.size}")
