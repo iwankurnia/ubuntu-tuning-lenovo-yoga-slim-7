@@ -84,12 +84,6 @@ To use a different size, change `SWAP_PERCENT` at the top of `install.sh`; the s
 | Woofer routing | The kernel has no entry for this laptop's sound codec (17aa:38d8), so without this the speakers sound thin. | `/etc/modprobe.d/yoga-slim7-audio.conf` |
 | Sound firmware and Intel video decoder | Makes sure both are installed, so video playback uses the GPU, not the CPU. | packages |
 
-### Text size
-
-| Change | Why | Where |
-|---|---|---|
-| Interface and terminal text at size 10 | One size smaller than Ubuntu's 11, which fits more on this 14-inch screen. The fonts themselves stay Ubuntu's; document text and window titles stay at 11. To use another size, change `FONT_SIZE` at the top of `install.sh`. | your desktop settings |
-
 ### Fonts (only with `--windows-fonts`)
 
 Ubuntu's own fonts and text smoothing are left alone unless you ask for this.
@@ -114,7 +108,7 @@ Everything the script does is logged to `/var/log/yoga-slim7-tuning.log`.
 ## Options
 
 ```bash
-sudo bash install.sh --keep-desktop   # leave dark style, dimming, idle times and text size alone
+sudo bash install.sh --keep-desktop   # leave dark style, dimming and idle times alone
 sudo bash install.sh --windows-fonts  # also switch to Selawik, Consolas and greyscale smoothing
 sudo bash install.sh --no-hibernate   # no swapfile change, no resume boot option
 sudo bash install.sh --no-zswap       # do not switch on compressed swap

@@ -108,7 +108,6 @@ KEYRING_NAME=Default_keyring
 KEYRING_BACKUP=$STATE_DIR/keyring-default.before
 KEEP_DESKTOP=0
 WITH_FONTS=0
-FONT_SIZE=10           # interface and terminal text; Ubuntu's own size is 11
 FONTS_READY=0
 FONT_CONF_NAME=45-yoga-slim7-fonts.conf
 WARNINGS=0
@@ -131,8 +130,7 @@ Usage: sudo bash install.sh [--undo] [--keep-desktop] [--windows-fonts] [--no-hi
 
   --undo               remove what this script set up and put the desktop options back
                        (ordinary packages and the enlarged swapfile are left in place)
-  --keep-desktop       do not change desktop options (dark style, dimming, idle times,
-                       text size)
+  --keep-desktop       do not change desktop options (dark style, dimming, idle times)
   --windows-fonts      also switch to Windows-like fonts (Selawik, Consolas) and greyscale
                        text smoothing; without it, Ubuntu's fonts are left alone
   --no-hibernate       do not set up hibernation (no swapfile change, no resume boot option)
@@ -671,28 +669,6 @@ tune_desktop() {
     gs_set org.gnome.desktop.session idle-delay "uint32 180" # screen off after 3 idle minutes
     gs_set $power sleep-inactive-battery-type "'suspend'"    # on battery: suspend when idle...
     gs_set $power sleep-inactive-battery-timeout 600         # ...for 10 minutes
-
-    # Interface and terminal text one size smaller than Ubuntu's 11. The font
-    # itself is kept, whichever it is. With --windows-fonts the font step
-    # chooses its own sizes, so this is skipped.
-    if [ "$WITH_FONTS" -eq 0 ]; then
-        gs_font_size $iface font-name "$FONT_SIZE"
-        gs_font_size $iface monospace-font-name "$FONT_SIZE"
-    fi
-}
-
-# gs_font_size SCHEMA KEY SIZE: changes only the size at the end of a font
-# setting such as 'Ubuntu Sans 11', keeping the font name.
-gs_font_size() {
-    local current family
-    current=$(as_user gsettings get "$1" "$2" 2>/dev/null) || { skip "$2 (this desktop has no such option)"; return; }
-    current=${current#\'}; current=${current%\'}
-    family=${current% *}
-    case "${current##* }" in
-        ''|*[!0-9.]*) skip "$2 ('$current' has no size to change)"; return ;;
-    esac
-    [ "$family" != "$current" ] || { skip "$2 ('$current' has no size to change)"; return; }
-    gs_set "$1" "$2" "'$family $3'"
 }
 
 # ---------------------------------------------------------------------------
