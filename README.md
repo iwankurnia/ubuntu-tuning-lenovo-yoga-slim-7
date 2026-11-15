@@ -19,6 +19,23 @@ sudo howdy add                    # save your face for face login
 
 The script only runs on an 83CV, refuses to run in the live USB session, and can be run again safely.
 
+## Checked on the real laptop
+
+First run on an 83CV with Ubuntu 26.10 (kernel 7.3.0), 2026-11-15:
+
+| Part | Result |
+|---|---|
+| Woofer fix | Works. The sound driver reports `picked fixup alc287-yoga9-bass-spk-pin`. |
+| Hibernation | Works. Hibernated and resumed twice; closing the lid hibernates. Secure Boot is off on this laptop. |
+| Automatic battery/mains switching | Works: Power Saver, `low-power` platform profile and the 60 s disk flush apply on battery. |
+| Idle devices, Wi-Fi power save | Applied: 24 PCI devices allowed to sleep; camera and Bluetooth suspend when unused. |
+| Face login | Howdy 3.0.1 installed and a face enrolled. |
+| Password-less keyring | Works; applications save into it without a prompt. |
+| Claude Desktop 5.11492.5, Claude Code 2.1.311 | Installed and running. |
+| Speaker sound profile | **Failed on the first run**: PipeWire could not load LV2 plugins. The missing package (`libspa-0.2-modules-extra`) is now installed by the script; not yet confirmed. |
+| Compressed swap (zswap) | Added after this run; not yet confirmed. |
+| Plain suspend (S0ix) and idle battery draw | Not measured yet. |
+
 ## What it changes
 
 ### Battery life
@@ -34,6 +51,7 @@ The script only runs on an 83CV, refuses to run in the live USB session, and can
 | Wi-Fi power save pinned on | The radio sleeps between packets. | `/etc/NetworkManager/conf.d/90-yoga-slim7-wifi-powersave.conf` |
 | NMI watchdog off | Removes a periodic CPU wake-up. | `/etc/sysctl.d/90-yoga-slim7-power.conf` |
 | Power-efficient kernel work queues | Background kernel work runs on a core that is already awake. Skipped if the kernel already has it on. | `/etc/default/grub.d/90-yoga-slim7-power.cfg` |
+| Compressed swap (zswap) | Memory on its way to the swapfile is compressed and kept in RAM first, so the SSD is woken and written far less when memory is full. On this laptop about 2 GB was in swap during normal work. Skipped if the kernel already has it on. | `/etc/default/grub.d/90-yoga-slim7-power.cfg` |
 | `thermald`, `power-profiles-daemon`, `intel-lpmd` enabled | Intel's and Ubuntu's own power daemons. `intel-lpmd` adjusts the CPU's energy preference to the workload the CPU reports. | services |
 
 ### Hibernation
@@ -79,12 +97,15 @@ Everything the script does is logged to `/var/log/yoga-slim7-tuning.log`.
 ```bash
 sudo bash install.sh --keep-desktop   # leave dark style, dimming and idle times alone
 sudo bash install.sh --no-hibernate   # no swapfile change, no resume boot option
+sudo bash install.sh --no-zswap       # do not switch on compressed swap
 sudo bash install.sh --no-speaker-tuning  # woofer fix only, no Dolby sound profile
 sudo bash install.sh --no-face-login  # do not install Howdy
 sudo bash install.sh --no-claude      # do not install Claude Desktop and Claude Code
 sudo bash install.sh --keep-keyring   # keep the keyring locked by your login password
 sudo bash install.sh --no-lpmd        # do not install intel-lpmd
 ```
+
+Running the script again is safe. If you changed a desktop option back after the first run (for example from the dark style to the light one), the script leaves your choice alone.
 
 ## Adjusting it
 
@@ -111,7 +132,13 @@ If S0ix stays near 0%, something is keeping the laptop awake while the lid is cl
 
 ## Battery charge limit
 
-Left as it is, because capping at 80% trades runtime for battery lifespan:
+Left as it is, because capping at 80% trades runtime for battery lifespan. On this laptop it was already on at the first Ubuntu boot. The setting lives in the laptop's firmware, so it most likely carried over from Windows.
+
+```bash
+yoga-power battery status         # what it is set to now
+```
+
+To change it:
 
 ```bash
 sudo yoga-power battery conserve  # stop charging at about 80%
@@ -134,7 +161,7 @@ The woofer fix makes all four speakers play. On top of that, the script rebuilds
 - The download is checked against a fixed commit hash (`2838efda3e5b…`). If it is anything else, it is deleted and not run. To move to a newer release, change `SPEAKER_TOOL_TAG` and `SPEAKER_TOOL_COMMIT` in `install.sh` together.
 - The result is a PipeWire filter in `~/.config/pipewire/pipewire.conf.d/` that loads every time sound starts. No extra application has to run.
 
-The sound cuts out for a moment while it installs. Judge the result after the reboot, when the woofers are active.
+It needs PipeWire's LV2 support (`libspa-0.2-modules-extra`), which Ubuntu does not install by default; the script adds it. The sound cuts out for a moment while it installs. Judge the result after the reboot, when the woofers are active.
 
 ```bash
 python3 /opt/yoga-slim7/speaker-tuning-to-easyeffects/dolby_to_pipewire.py --doctor      # check it
@@ -215,7 +242,7 @@ After the install, open Claude and sign in, then run `claude` in a terminal and 
 
 Things to know about the Linux beta:
 
-- **Ubuntu 26.10 is not on Anthropic's tested list** (Ubuntu 22.04 or later is the stated requirement). Every package it depends on exists in 26.10, but it has not been run there by this kit.
+- **Ubuntu 26.10 is not on Anthropic's tested list** (Ubuntu 22.04 or later is the stated requirement), but both packages installed and run on this laptop under 26.10.
 - **Not available yet:** Computer Use and dictation.
 - **"Cowork requires the vhost_vsock kernel module":** run `sudo modprobe vhost_vsock` and restart the app.
 

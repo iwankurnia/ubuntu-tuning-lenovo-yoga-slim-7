@@ -41,7 +41,8 @@ SPEAKER_TOOL_DIR=$OPT_DIR/speaker-tuning-to-easyeffects
 SPEAKER_TOOL_REPO=https://github.com/antoinecellerier/speaker-tuning-to-easyeffects.git
 SPEAKER_TOOL_TAG=v2026.10.1
 SPEAKER_TOOL_COMMIT=2838efda3e5bcac4002ec91c78a43a66f8ada878      # what that tag pointed at on 2026-11-15
-SPEAKER_PACKAGES=(git python3-numpy python3-scipy python3-rich lsp-plugins-lv2 calf-plugins lilv-utils)
+# libspa-0.2-modules-extra is what lets PipeWire load LV2 plugins; without it the filter cannot start.
+SPEAKER_PACKAGES=(git python3-numpy python3-scipy python3-rich lsp-plugins-lv2 calf-plugins lilv-utils libspa-0.2-modules-extra)
 
 # Face login (Howdy 3, from its author's PPA; it is not in the Ubuntu archive)
 HOWDY_PPA=ppa:boltgolt/howdy
@@ -73,6 +74,7 @@ MODE=install
 FORCE=0
 WITH_LPMD=1
 WITH_HIBERNATE=1
+WITH_ZSWAP=1
 WITH_SPEAKER_TUNING=1
 WITH_FACE_LOGIN=1
 WITH_CLAUDE=1
@@ -95,14 +97,15 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-speaker-tuning]
-                            [--no-face-login] [--no-claude] [--keep-keyring] [--no-lpmd]
-                            [--force]
+Usage: sudo bash install.sh [--undo] [--keep-desktop] [--no-hibernate] [--no-zswap]
+                            [--no-speaker-tuning] [--no-face-login] [--no-claude]
+                            [--keep-keyring] [--no-lpmd] [--force]
 
   --undo               remove what this script set up and put the desktop options back
                        (ordinary packages and the enlarged swapfile are left in place)
   --keep-desktop       do not change desktop options (dark style, dimming, idle times)
   --no-hibernate       do not set up hibernation (no swapfile change, no resume boot option)
+  --no-zswap           do not switch on compressed swap (zswap)
   --no-speaker-tuning  fix the woofers only; do not add the Dolby sound profile
   --no-face-login      do not install Howdy face login
   --no-claude          do not install Claude Desktop and the Claude Code CLI
@@ -118,6 +121,7 @@ for arg in "$@"; do
         --undo) MODE=undo ;;
         --keep-desktop) KEEP_DESKTOP=1 ;;
         --no-hibernate) WITH_HIBERNATE=0 ;;
+        --no-zswap) WITH_ZSWAP=0 ;;
         --no-speaker-tuning) WITH_SPEAKER_TUNING=0 ;;
         --no-face-login) WITH_FACE_LOGIN=0 ;;
         --no-claude) WITH_CLAUDE=0 ;;
@@ -285,29 +289,60 @@ enable_services() {
 }
 
 # ---------------------------------------------------------------------------
-# One kernel boot option: let background kernel work run on whichever core is
-# already awake instead of waking a sleeping one.
+# Kernel boot options. Each is added only when the kernel does not already do
+# it by itself.
+#  - workqueue.power_efficient: background kernel work runs on whichever core
+#    is already awake instead of waking a sleeping one.
+#  - zswap: memory pages on their way to the swapfile are compressed and kept
+#    in RAM first, so a laptop that swaps (16 GB fills up quickly with several
+#    browser-based applications) wakes and writes the SSD far less often.
+
+# needs_boot_param FILE NAME: true when the feature is off, or is on only
+# because an earlier run of this script put NAME on the kernel command line.
+needs_boot_param() {
+    [ -r "$1" ] || return 1                       # this kernel has no such feature
+    [ "$(cat "$1")" != Y ] || grep -qw "$2" /proc/cmdline
+}
+
 tune_boot() {
-    say "Kernel boot option"
-    local param=/sys/module/workqueue/parameters/power_efficient
-    if [ "$(cat "$param" 2>/dev/null)" = Y ] && [ ! -f "$GRUB_DROPIN" ]; then
-        skip "power-efficient workqueues are already on in this kernel"
+    say "Kernel boot options"
+    local params=""
+    if needs_boot_param /sys/module/workqueue/parameters/power_efficient workqueue.power_efficient=1; then
+        params="workqueue.power_efficient=1"
+    else
+        skip "power-efficient work queues are already on in this kernel"
+    fi
+    if [ "$WITH_ZSWAP" -eq 0 ]; then
+        skip "compressed swap left alone (--no-zswap)"
+    elif needs_boot_param /sys/module/zswap/parameters/enabled zswap.enabled=1; then
+        params="$params zswap.enabled=1 zswap.compressor=lz4"
+    else
+        skip "compressed swap (zswap) is already on in this kernel"
+    fi
+    params=${params# }
+
+    if [ -z "$params" ]; then
+        if [ -f "$GRUB_DROPIN" ]; then
+            rm -f "$GRUB_DROPIN"
+            update-grub >/dev/null 2>&1
+            ok "removed $GRUB_DROPIN (no longer needed)"
+        fi
         return
     fi
     if [ ! -f /etc/default/grub ] || ! command -v update-grub >/dev/null; then
-        skip "this install does not boot through GRUB, boot option not added"
+        skip "this install does not boot through GRUB, boot options not added"
         return
     fi
     mkdir -p /etc/default/grub.d
-    cat > "$GRUB_DROPIN" <<'EOF'
+    cat > "$GRUB_DROPIN" <<EOF
 # Yoga Slim 7 14IMH9 (written by yoga-slim7-ubuntu/install.sh).
-GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT workqueue.power_efficient=1"
+GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT $params"
 EOF
     if update-grub >/dev/null 2>&1; then
-        ok "wrote $GRUB_DROPIN (active after the next reboot)"
+        ok "boot options set: $params (active after the next reboot)"
     else
         rm -f "$GRUB_DROPIN"
-        warn "update-grub failed, boot option removed again"
+        warn "update-grub failed, boot options removed again"
     fi
 }
 
@@ -528,7 +563,13 @@ gs_set() {
         skip "$2 (already $3)"
         return
     fi
-    grep -qs "^$1|$2|" "$GS_BACKUP" || printf '%s|%s|%s\n' "$1" "$2" "$old" >> "$GS_BACKUP"
+    # An earlier run already set this, and it has a different value now: you
+    # changed it back yourself. Your choice wins; do not force it again.
+    if grep -qs "^$1|$2|" "$GS_BACKUP"; then
+        skip "$2 (you set it to $old after the first run; left alone)"
+        return
+    fi
+    printf '%s|%s|%s\n' "$1" "$2" "$old" >> "$GS_BACKUP"
     if as_user gsettings set "$1" "$2" "$3" 2>/dev/null; then
         ok "$2 = $3 (was $old)"
     else
@@ -618,7 +659,7 @@ tune_speaker_sound() {
     [ -f "$xml" ] || install -m 644 "$xml_src" "$xml"
     if [ ! -f "$SPEAKER_TOOL_DIR/dolby_to_pipewire.py" ]; then
         rm -rf "$SPEAKER_TOOL_DIR"
-        if ! git clone -q --depth 1 --branch "$SPEAKER_TOOL_TAG" "$SPEAKER_TOOL_REPO" "$SPEAKER_TOOL_DIR"; then
+        if ! git -c advice.detachedHead=false clone -q --depth 1 --branch "$SPEAKER_TOOL_TAG" "$SPEAKER_TOOL_REPO" "$SPEAKER_TOOL_DIR"; then
             warn "could not download the converter ($SPEAKER_TOOL_REPO)"
             return
         fi

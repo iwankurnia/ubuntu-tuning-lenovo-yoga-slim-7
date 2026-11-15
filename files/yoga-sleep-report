@@ -66,7 +66,10 @@ case "$1" in
             if (ac0 == 1 || ac1 == 1) printf ", on mains power"
             else {
                 wh = (e0 - e1) / 1000000
-                printf ", used %.2f Wh (%.0f mW average)", wh, wh / (dt / 3600) * 1000
+                # A hibernated laptop is off; what it used went into saving and
+                # loading the memory image, so an average over the time is meaningless.
+                if (kind == "hibernate") printf ", used %.2f Wh to save and restore", wh
+                else printf ", used %.2f Wh (%.0f mW average)", wh, wh / (dt / 3600) * 1000
             }
         }')
 

@@ -110,15 +110,22 @@ conservation_file() {
     return 1
 }
 
+# The kernel lists the charge types on one line with the active one in
+# brackets. On this laptop: "Fast Standard [Long_Life]". Some kernels spell it
+# "Long Life", so both are accepted.
+charge_type_active() { sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$1"; }
+charge_type_long_life() { grep -oE 'Long[_ ]Life' "$1" | head -n 1; }
+
 battery_limit_status() {
     local b ct cm
     b=$(bat_dir) || { echo "no battery found"; return; }
     ct="$b/charge_types"
     if [ -r "$ct" ]; then
-        case "$(cat "$ct")" in
-            *"[Long Life]"*) echo "conserve (stops at about 80%)" ;;
-            *"[Standard]"*)  echo "full (charges to 100%)" ;;
-            *)               cat "$ct" ;;
+        case "$(charge_type_active "$ct")" in
+            Long_Life|"Long Life") echo "conserve (stops at about 80%)" ;;
+            Standard)              echo "full (charges to 100%)" ;;
+            Fast)                  echo "full, rapid charge (charges to 100%, faster and warmer)" ;;
+            *)                     cat "$ct" ;;
         esac
     elif cm=$(conservation_file); then
         if [ "$(cat "$cm")" = 1 ]; then echo "conserve (stops at about 80%)"; else echo "full (charges to 100%)"; fi
@@ -129,11 +136,12 @@ battery_limit_status() {
 
 battery_limit_set() {
     need_root battery "$1"
-    local b ct cm
+    local b ct cm long_life
     b=$(bat_dir) || { echo "no battery found" >&2; exit 1; }
     ct="$b/charge_types"
-    if [ -e "$ct" ] && grep -q 'Long Life' "$ct"; then
-        if [ "$1" = conserve ]; then echo 'Long Life' > "$ct"; else echo 'Standard' > "$ct"; fi
+    if [ -e "$ct" ] && long_life=$(charge_type_long_life "$ct") && [ -n "$long_life" ]; then
+        if [ "$1" = conserve ]; then echo "$long_life" > "$ct"; else echo 'Standard' > "$ct"; fi \
+            || { echo "the kernel refused the change" >&2; exit 1; }
     elif cm=$(conservation_file); then
         if [ "$1" = conserve ]; then echo 1 > "$cm"; else echo 0 > "$cm"; fi
     else
@@ -308,7 +316,7 @@ service_enabled() {
 }
 
 status() {
-    local b f auto=0 on=0 card ifc p
+    local b f auto=0 on=0 ifc p user_home
     load_config
 
     echo "Machine"
@@ -371,26 +379,21 @@ status() {
     fi
 
     echo "Sound"
-    if [ -f "$AUDIO_CONF" ]; then row "woofer fix file" "present"; else row "woofer fix file" "absent"; fi
-    card=""
-    for f in "$PROC"/asound/card*/codec#*; do
-        [ -r "$f" ] || continue
-        if grep -q 'ALC287' "$f"; then
-            card=${f#"$PROC"/asound/card}
-            card=${card%%/*}
-            break
-        fi
-    done
-    if [ -n "$card" ] && command -v amixer >/dev/null; then
-        if amixer -c "$card" scontrols 2>/dev/null | grep -q 'Bass Speaker'; then
-            row "woofers" "routed (Bass Speaker control exists)"
-        else
-            row "woofers" "NOT routed yet (reboot after install; if still missing, see README)"
-        fi
+    # What the sound driver was actually loaded with. (A "Bass Speaker" volume
+    # control exists with or without the fix, so it proves nothing.)
+    if [ "$(cat "$SYS/module/snd_sof_intel_hda_generic/parameters/hda_model" 2>/dev/null)" = alc287-yoga9-bass-spk-pin ]; then
+        row "woofers" "routed (fix active in the sound driver)"
+    elif [ -f "$AUDIO_CONF" ]; then
+        row "woofers" "fix installed but not active yet: reboot"
     else
-        row "woofers" "could not check (ALC287 codec or amixer not found)"
+        row "woofers" "fix not installed"
     fi
-    if ls "${HOME:-/nonexistent}"/.config/pipewire/pipewire.conf.d/*[Dd]olby* >/dev/null 2>&1; then
+    # Under sudo, HOME may be root's; the sound profile belongs to the person who ran sudo.
+    user_home=${HOME:-/nonexistent}
+    if [ -n "${SUDO_USER:-}" ] && [ -z "$ROOT" ]; then
+        user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    fi
+    if ls "$user_home"/.config/pipewire/pipewire.conf.d/*[Dd]olby* >/dev/null 2>&1; then
         row "sound profile" "installed (Dolby filter)"
     else
         row "sound profile" "not installed for this user"
