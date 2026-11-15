@@ -174,12 +174,14 @@ It is close to the Windows sound, not identical: Dolby Atmos itself is Windows-o
 
 The script installs [Howdy](https://github.com/boltgolt/howdy) 3 from its author's PPA (`ppa:boltgolt/howdy`), because it is not in the Ubuntu archive, and points it at the infrared camera. The install compiles a face-recognition library, which takes several minutes.
 
+It also keeps the camera's **infrared light on** during a scan. On its own, this camera flashes the light a few times when it starts and then leaves it off, so Howdy sees only a dark outline and times out ("Failure, timeout reached"). The script installs [linux-enable-ir-emitter](https://github.com/EmixamPP/linux-enable-ir-emitter) 7.0.0 (the release download, checked against its SHA-256), writes the setting that keeps the light on to `~/.config/linux-enable-ir-emitter.toml`, and adds it to the login settings so the light is switched on before every face scan. The setting (UVC unit 14, selector 6, value `1 3 2`) was found on this laptop with `linux-enable-ir-emitter configure`; it is only written when the camera `04f2:b7f5` is present, and a config that already has a setting is kept.
+
 After the reboot, enrol your face and test:
 
 ```bash
 sudo howdy add     # look at the camera
-sudo howdy test    # shows what the infrared camera sees
-sudo -i            # in a new terminal: should recognise you without a password
+sudo -k true       # should print "Identified face as <you>" with no password
+sudo howdy test    # shows what the infrared camera sees: your face should be lit
 ```
 
 What to expect:
@@ -189,16 +191,16 @@ What to expect:
 - **Security:** Howdy's authors say plainly that it is less secure than a password and must not be the only way in. A good photo or a lookalike may pass.
 - **Lid closed:** Howdy skips itself, so a docked laptop asks for the password straight away.
 
-If `sudo howdy test` shows a black or very dark picture, the infrared light is not switching on. That needs a one-off interactive setup with [linux-enable-ir-emitter](https://github.com/EmixamPP/linux-enable-ir-emitter), which asks you to watch the light, so the script cannot do it for you:
+If your face is still a dark outline in `sudo howdy test` (another camera, or a firmware update changed the control), find the setting again. It asks whether the light is blinking after each try: answer **n** at the first question when the light only flashes at the start, and **y** only when it keeps flashing, otherwise it stops with "already working" and saves nothing.
 
 ```bash
-# download linux-enable-ir-emitter-7.0.0-release-x86-64.tar.gz from the project's releases page, then:
-sudo tar -C /usr/local/bin/ --no-same-owner -m -vxzf linux-enable-ir-emitter*.tar.gz
 linux-enable-ir-emitter configure
 sudo linux-enable-ir-emitter setup-howdy
 ```
 
-Skip face login with `--no-face-login`. Remove it later with `sudo apt remove howdy howdy-gtk`.
+Re-enrol (`sudo howdy add`) after the light starts working, since a face saved in the dark matches badly.
+
+Skip face login, including the infrared step, with `--no-face-login`. `--undo` removes the infrared step from the login settings and the setting the script wrote, then Howdy.
 
 ## Password keyring without a password
 

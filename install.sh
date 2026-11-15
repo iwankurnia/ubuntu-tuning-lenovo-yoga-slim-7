@@ -49,6 +49,21 @@ HOWDY_PPA=ppa:boltgolt/howdy
 HOWDY_CONFIG=/etc/howdy/config.ini
 HOWDY_MARKER=$STATE_DIR/howdy-installed-by-kit
 
+# Infrared light for face login. This camera only flashes its infrared light for a
+# moment when it starts, so Howdy scans in the dark. linux-enable-ir-emitter keeps it
+# on: it sets one vendor control before each scan. The value below was found with
+# `linux-enable-ir-emitter configure` on this laptop (2026-11-15) and works for it.
+IR_TOOL_VERSION=7.0.0
+IR_TOOL_URL=https://github.com/EmixamPP/linux-enable-ir-emitter/releases/download/$IR_TOOL_VERSION/linux-enable-ir-emitter-$IR_TOOL_VERSION-release-x86-64.tar.gz
+IR_TOOL_SHA256=b5ea03b8a058b4d028d7c54dbd307b4bac2159a32cd2999da06cadc692907375   # that tarball, checked 2026-11-15
+IR_TOOL=/usr/local/bin/linux-enable-ir-emitter
+IR_CAMERA_ID=04f2:b7f5                     # Chicony "Integrated Camera" in the Yoga Slim 7 14IMH9
+IR_CONTROL_UNIT=14
+IR_CONTROL_SELECTOR=6
+IR_CONTROL_VALUE="[1, 3, 2, 0, 0, 0, 0, 0, 0]"
+IR_TOOL_MARKER=$STATE_DIR/ir-emitter-installed-by-kit
+IR_CONFIG_MARKER=$STATE_DIR/ir-emitter-config-written-by-kit   # holds the path of the config the kit wrote
+
 # Claude Desktop and the Claude Code CLI, from Anthropic's signed apt repositories.
 # Both repositories are signed with the same key; its fingerprint is published at
 # https://code.claude.com/docs/en/setup and checked before the key is trusted.
@@ -765,9 +780,119 @@ setup_face_login() {
         warn "no infrared camera found; set device_path yourself with: sudo howdy config"
     fi
     FACE_LOGIN_READY=1
+    setup_ir_emitter
+}
+
+# The sysfs folder of the USB camera with the given vendor:product, if it is connected.
+usb_device_dir() {
+    local d
+    for d in /sys/bus/usb/devices/*; do
+        [ -f "$d/idVendor" ] && [ -f "$d/idProduct" ] || continue
+        [ "$(cat "$d/idVendor"):$(cat "$d/idProduct")" = "$1" ] && { echo "$d"; return 0; }
+    done
+    return 1
+}
+
+# The tool's name for the infrared node: usb-VID:PID-SERIAL-ifNN-indexN (its v7 format).
+ir_device_key() {
+    local dev="$1" node iface index serial
+    serial=$(cat "$dev/serial" 2>/dev/null || echo 0)
+    for node in "$dev"/*:*/video4linux/video*; do
+        [ -e "$node" ] || continue
+        v4l2-ctl -d "/dev/$(basename "$node")" --list-formats 2>/dev/null | grep -q "'GREY'" || continue
+        iface=$(cat "$(dirname "$(dirname "$node")")/bInterfaceNumber" 2>/dev/null) || continue
+        index=$(cat "$node/index" 2>/dev/null || echo 0)
+        echo "usb-$IR_CAMERA_ID-$serial-if$iface-index$index"
+        return 0
+    done
+    return 1
+}
+
+setup_ir_emitter() {
+    local dev key user home cfg tmp
+    if ! dev=$(usb_device_dir "$IR_CAMERA_ID"); then
+        skip "infrared light: camera $IR_CAMERA_ID not found (the saved setting is for this laptop's camera only)"
+        return
+    fi
+    if [ "$(uname -m)" != x86_64 ]; then
+        warn "infrared light: the kit only carries the x86-64 build of linux-enable-ir-emitter"
+        return
+    fi
+
+    # 1. the tool, from its GitHub release, checked against the SHA-256 recorded above
+    if [ -x "$IR_TOOL" ] && "$IR_TOOL" --version 2>/dev/null | grep -qF "$IR_TOOL_VERSION"; then
+        skip "linux-enable-ir-emitter $IR_TOOL_VERSION (already installed)"
+    else
+        tmp=$(mktemp -d)
+        if ! curl -fsSLo "$tmp/tool.tar.gz" "$IR_TOOL_URL"; then
+            warn "infrared light: could not download linux-enable-ir-emitter"
+            rm -rf "$tmp"; return
+        fi
+        if [ "$(sha256sum "$tmp/tool.tar.gz" | cut -d' ' -f1)" != "$IR_TOOL_SHA256" ]; then
+            warn "infrared light: the linux-enable-ir-emitter download does not match its recorded checksum; not installed"
+            rm -rf "$tmp"; return
+        fi
+        tar -C "$tmp" --no-same-owner -xzf "$tmp/tool.tar.gz" linux-enable-ir-emitter
+        install -m 755 "$tmp/linux-enable-ir-emitter" "$IR_TOOL"
+        rm -rf "$tmp"
+        mkdir -p "$STATE_DIR"
+        touch "$IR_TOOL_MARKER"
+        ok "linux-enable-ir-emitter $IR_TOOL_VERSION installed in $IR_TOOL"
+    fi
+
+    # 2. the setting that keeps the light on, in the user's own config (the tool reads the
+    #    config of the user who is signing in). A config with content is never replaced.
+    user=${SUDO_USER:-}
+    if [ -z "$user" ] || [ "$user" = root ]; then
+        warn "infrared light: run the script with sudo from your own account so the setting goes into your config"
+        return
+    fi
+    home=$(getent passwd "$user" | cut -d: -f6)
+    cfg=$home/.config/linux-enable-ir-emitter.toml
+    if [ -s "$cfg" ]; then
+        skip "infrared setting ($cfg already has one; kept)"
+    elif ! key=$(ir_device_key "$dev"); then
+        warn "infrared light: could not find the camera's infrared node; run: linux-enable-ir-emitter configure"
+        return
+    else
+        install -d -o "$user" -g "$(id -gn "$user")" "$home/.config"
+        printf '[["%s".savelist]]\nunit = %s\nselector = %s\ncontrol = %s\n' \
+            "$key" "$IR_CONTROL_UNIT" "$IR_CONTROL_SELECTOR" "$IR_CONTROL_VALUE" > "$cfg"
+        chown "$user:$(id -gn "$user")" "$cfg"
+        chmod 664 "$cfg"
+        mkdir -p "$STATE_DIR"
+        echo "$cfg" > "$IR_CONFIG_MARKER"
+        ok "infrared setting written to $cfg ($key)"
+    fi
+
+    # 3. switch the light on before every face scan: login, lock screen, sudo, polkit prompts
+    if grep -qs "linux-enable-ir-emitter run" /etc/pam.d/common-auth; then
+        skip "infrared light already switched on before each face scan"
+    elif "$IR_TOOL" setup-howdy >/dev/null 2>&1 && grep -qs "linux-enable-ir-emitter run" /etc/pam.d/common-auth; then
+        ok "infrared light switched on before each face scan (login, lock screen, sudo)"
+    else
+        warn "infrared light: 'linux-enable-ir-emitter setup-howdy' failed; run it yourself with sudo"
+    fi
+}
+
+remove_ir_emitter() {
+    if [ -x "$IR_TOOL" ] && grep -qs "linux-enable-ir-emitter run" /etc/pam.d/common-auth; then
+        "$IR_TOOL" setup-howdy --undo >/dev/null 2>&1 && ok "infrared step removed from the login settings" \
+            || warn "could not remove the infrared step; run: sudo linux-enable-ir-emitter setup-howdy --undo"
+    fi
+    if [ -f "$IR_CONFIG_MARKER" ]; then
+        local cfg
+        cfg=$(cat "$IR_CONFIG_MARKER")
+        [ -f "$cfg" ] && rm -f "$cfg" && ok "removed $cfg"
+        rm -f "$IR_CONFIG_MARKER"
+    fi
+    if [ -f "$IR_TOOL_MARKER" ]; then
+        rm -f "$IR_TOOL" "$IR_TOOL_MARKER" && ok "removed $IR_TOOL"
+    fi
 }
 
 remove_face_login() {
+    remove_ir_emitter
     [ -f "$HOWDY_MARKER" ] || return 0
     apt-get remove -y -q howdy howdy-gtk >/dev/null 2>&1 && ok "howdy removed" || warn "could not remove howdy"
     add-apt-repository -y --remove "$HOWDY_PPA" >/dev/null 2>&1
@@ -1065,7 +1190,7 @@ echo "  2. sudo yoga-power lid hibernate    (only after step 1 worked: hibernate
 echo "  3. yoga-power measure               (on battery: the real power draw)"
 if [ "$FACE_LOGIN_READY" -eq 1 ]; then
     echo "  4. sudo howdy add                   (look at the camera: saves your face)"
-    echo "  5. sudo howdy test                  (shows what the infrared camera sees; see README if it is black)"
+    echo "  5. sudo -k true                     (should say \"Identified face\"; see README if it times out)"
 fi
 if [ "$CLAUDE_READY" -eq 1 ]; then
     echo "  -  open Claude from the application menu and sign in; in a terminal, run: claude"
