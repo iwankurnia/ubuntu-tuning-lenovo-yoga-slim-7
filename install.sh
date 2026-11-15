@@ -64,6 +64,13 @@ IR_CONTROL_VALUE="[1, 3, 2, 0, 0, 0, 0, 0, 0]"
 IR_TOOL_MARKER=$STATE_DIR/ir-emitter-installed-by-kit
 IR_CONFIG_MARKER=$STATE_DIR/ir-emitter-config-written-by-kit   # holds the path of the config the kit wrote
 
+# Face ID-style popup: replaces howdy-gtk's "Loading..." window (diverted, so a Howdy
+# update does not overwrite it), plus a rubberstamp that tells it about a success.
+POPUP_FILE=/usr/lib/howdy-gtk/authsticky.py
+POPUP_DIVERTED=/usr/lib/howdy-gtk/authsticky.py.howdy
+STAMP_FILE=/lib/security/howdy/rubberstamps/faceid.py
+STAMP_STATE=$STATE_DIR/howdy-rubberstamps.before          # the [rubberstamps] settings before the kit
+
 # Claude Desktop and the Claude Code CLI, from Anthropic's signed apt repositories.
 # Both repositories are signed with the same key; its fingerprint is published at
 # https://code.claude.com/docs/en/setup and checked before the key is trusted.
@@ -781,6 +788,95 @@ setup_face_login() {
     fi
     FACE_LOGIN_READY=1
     setup_ir_emitter
+    setup_faceid_popup
+}
+
+# howdy_stamps set|restore: edits the [rubberstamps] section of the Howdy config.
+#   set:     turns rubberstamps on with only the "faceid" rule (when they were off), or adds
+#            the rule to the existing ones (when they were on); the old values go to STAMP_STATE.
+#   restore: puts the saved values back.
+howdy_stamps() {
+    python3 - "$1" "$HOWDY_CONFIG" "$STAMP_STATE" <<'PY'
+import json, os, re, sys
+mode, path, state_path = sys.argv[1:4]
+lines = open(path, encoding="utf-8").read().split("\n")
+start = next((i for i, l in enumerate(lines) if l.strip() == "[rubberstamps]"), None)
+if start is None:
+    sys.exit("no [rubberstamps] section")
+end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+sec = lines[start + 1:end]
+
+def find(key):
+    for i, l in enumerate(sec):
+        if re.match(rf"^{key}\s*=", l):
+            j = i + 1
+            while j < len(sec) and sec[j][:1] in (" ", "\t") and sec[j].strip():
+                j += 1
+            return i, j
+    return None
+
+e, r = find("enabled"), find("stamp_rules")
+if e is None or r is None:
+    sys.exit("[rubberstamps] lacks enabled or stamp_rules")
+rule = "\tfaceid\t\t1s\t\tfailsafe"
+if mode == "set":
+    if any(l.strip().startswith("faceid") for l in sec[r[0]:r[1]]):
+        sys.exit(0)                                   # already set
+    was_on = sec[e[0]].split("=", 1)[1].strip().lower() == "true"
+    json.dump({"enabled": sec[e[0]], "rules": sec[r[0]:r[1]]}, open(state_path, "w"))
+    new_rules = sec[r[0]:r[1]] + [rule] if was_on else ["stamp_rules =", rule]
+    new_enabled = "enabled = true"
+else:
+    if not os.path.exists(state_path):
+        sys.exit(0)
+    saved = json.load(open(state_path))
+    new_rules, new_enabled = saved["rules"], saved["enabled"]
+# replace the later block first so the earlier indexes stay valid
+for (a, b), repl in sorted([(r, new_rules), ((e[0], e[0] + 1), [new_enabled])], reverse=True):
+    sec[a:b] = repl
+lines[start + 1:end] = sec
+tmp = path + ".kit-tmp"
+open(tmp, "w", encoding="utf-8").write("\n".join(lines))
+os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+os.replace(tmp, path)
+if mode == "restore":
+    os.remove(state_path)
+PY
+}
+
+setup_faceid_popup() {
+    local src="$KIT_DIR/files/howdy-faceid"
+    if ! dpkg-query -W -f='${Status}' howdy-gtk 2>/dev/null | grep -q 'install ok installed'; then
+        skip "Face ID popup: howdy-gtk is not installed"
+        return
+    fi
+    if ! python3 -c 'import gi; gi.require_version("PangoCairo", "1.0")' 2>/dev/null; then
+        apt_install_each gir1.2-pango-1.0 || { warn "Face ID popup: PangoCairo is missing; Howdy's own popup kept"; return; }
+    fi
+    # Howdy's own popup is moved aside, so package updates land there and not over ours
+    if ! dpkg-divert --list "$POPUP_FILE" | grep -q .; then
+        dpkg-divert --quiet --local --rename --divert "$POPUP_DIVERTED" --add "$POPUP_FILE" \
+            || { warn "Face ID popup: could not divert $POPUP_FILE"; return; }
+    fi
+    install -m 644 "$src/authsticky.py" "$POPUP_FILE"
+    install -m 644 "$src/faceid.py" "$STAMP_FILE"
+    mkdir -p "$STATE_DIR"
+    if howdy_stamps set; then
+        ok "Face ID-style popup installed (Howdy's own is kept as $POPUP_DIVERTED)"
+    else
+        warn "Face ID popup installed, but the success tick could not be enabled in $HOWDY_CONFIG"
+    fi
+}
+
+remove_faceid_popup() {
+    if dpkg-divert --list "$POPUP_FILE" | grep -q .; then
+        rm -f "$POPUP_FILE"
+        dpkg-divert --quiet --local --rename --remove "$POPUP_FILE" && ok "Howdy's own popup restored"
+    fi
+    [ -f "$STAMP_FILE" ] && rm -f "$STAMP_FILE" && ok "removed $STAMP_FILE"
+    if [ -f "$STAMP_STATE" ] && [ -f "$HOWDY_CONFIG" ]; then
+        howdy_stamps restore && ok "Howdy rubberstamp settings put back"
+    fi
 }
 
 # The sysfs folder of the USB camera with the given vendor:product, if it is connected.
@@ -892,6 +988,7 @@ remove_ir_emitter() {
 }
 
 remove_face_login() {
+    remove_faceid_popup
     remove_ir_emitter
     [ -f "$HOWDY_MARKER" ] || return 0
     apt-get remove -y -q howdy howdy-gtk >/dev/null 2>&1 && ok "howdy removed" || warn "could not remove howdy"

@@ -176,6 +176,8 @@ The script installs [Howdy](https://github.com/boltgolt/howdy) 3 from its author
 
 It also keeps the camera's **infrared light on** during a scan. On its own, this camera flashes the light a few times when it starts and then leaves it off, so Howdy sees only a dark outline and times out ("Failure, timeout reached"). The script installs [linux-enable-ir-emitter](https://github.com/EmixamPP/linux-enable-ir-emitter) 7.0.0 (the release download, checked against its SHA-256), writes the setting that keeps the light on to `~/.config/linux-enable-ir-emitter.toml`, and adds it to the login settings so the light is switched on before every face scan. The setting (UVC unit 14, selector 6, value `1 3 2`) was found on this laptop with `linux-enable-ir-emitter configure`; it is only written when the camera `04f2:b7f5` is present, and a config that already has a setting is kept.
 
+It replaces Howdy's "Loading..." bar with a **Face ID-style popup**: a small rounded square under the camera with the Face ID symbol, which pulses while it scans and turns into a tick ("Recognised") when it knows you. Howdy's own popup file is moved aside with `dpkg-divert` (kept as `/usr/lib/howdy-gtk/authsticky.py.howdy`), so a Howdy update does not overwrite the new one. The tick comes from a small Howdy rubberstamp (`/lib/security/howdy/rubberstamps/faceid.py`, rule `faceid 1s failsafe` in `/etc/howdy/config.ini`): it adds about a third of a second to a successful sign-in and can never block one. Howdy does not tell the popup about a failure, so then it simply closes and the password prompt follows. The files are in `files/howdy-faceid/`.
+
 After the reboot, enrol your face and test:
 
 ```bash
@@ -200,7 +202,7 @@ sudo linux-enable-ir-emitter setup-howdy
 
 Re-enrol (`sudo howdy add`) after the light starts working, since a face saved in the dark matches badly.
 
-Skip face login, including the infrared step, with `--no-face-login`. `--undo` removes the infrared step from the login settings and the setting the script wrote, then Howdy.
+Skip face login, including the infrared step and the popup, with `--no-face-login`. `--undo` puts Howdy's own popup and rubberstamp settings back, removes the infrared step from the login settings and the setting the script wrote, then Howdy.
 
 ## Password keyring without a password
 
