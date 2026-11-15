@@ -84,7 +84,9 @@ To use a different size, change `SWAP_PERCENT` at the top of `install.sh`; the s
 | Woofer routing | The kernel has no entry for this laptop's sound codec (17aa:38d8), so without this the speakers sound thin. | `/etc/modprobe.d/yoga-slim7-audio.conf` |
 | Sound firmware and Intel video decoder | Makes sure both are installed, so video playback uses the GPU, not the CPU. | packages |
 
-### Fonts
+### Fonts (only with `--windows-fonts`)
+
+Ubuntu's own fonts and text smoothing are left alone unless you ask for this.
 
 | Change | Why | Where |
 |---|---|---|
@@ -107,7 +109,7 @@ Everything the script does is logged to `/var/log/yoga-slim7-tuning.log`.
 
 ```bash
 sudo bash install.sh --keep-desktop   # leave dark style, dimming and idle times alone
-sudo bash install.sh --keep-fonts     # leave fonts and text smoothing alone
+sudo bash install.sh --windows-fonts  # also switch to Selawik, Consolas and greyscale smoothing
 sudo bash install.sh --no-hibernate   # no swapfile change, no resume boot option
 sudo bash install.sh --no-zswap       # do not switch on compressed swap
 sudo bash install.sh --no-speaker-tuning  # woofer fix only, no Dolby sound profile
@@ -173,7 +175,7 @@ With an external monitor connected, the display scale is left alone and only the
 
 ## Fonts
 
-The script sets up the fonts for the person who ran `sudo`, in their home folder:
+This part is optional. Run the script with `--windows-fonts` to get it; it then sets up the fonts for the person who ran `sudo`, in their home folder:
 
 - **Selawik** comes with the kit (`files/fonts/selawik`, version 1.01, identical to Microsoft's release, SIL Open Font License). It has no true italic; applications slant the regular shape instead.
 - **Consolas** is not in the kit, because it is Microsoft's property. It arrives with `ttf-mscorefonts-installer`, which asks you to accept Microsoft's licence, so the script does not install it for you. Without it, the code font stays as it is.

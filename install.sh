@@ -107,7 +107,7 @@ KEEP_KEYRING=0
 KEYRING_NAME=Default_keyring
 KEYRING_BACKUP=$STATE_DIR/keyring-default.before
 KEEP_DESKTOP=0
-KEEP_FONTS=0
+WITH_FONTS=0
 FONTS_READY=0
 FONT_CONF_NAME=45-yoga-slim7-fonts.conf
 WARNINGS=0
@@ -124,14 +124,15 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-Usage: sudo bash install.sh [--undo] [--keep-desktop] [--keep-fonts] [--no-hibernate] [--no-zswap]
+Usage: sudo bash install.sh [--undo] [--keep-desktop] [--windows-fonts] [--no-hibernate] [--no-zswap]
                             [--no-speaker-tuning] [--no-face-login] [--no-claude]
                             [--keep-keyring] [--no-lpmd] [--force]
 
   --undo               remove what this script set up and put the desktop options back
                        (ordinary packages and the enlarged swapfile are left in place)
   --keep-desktop       do not change desktop options (dark style, dimming, idle times)
-  --keep-fonts         do not change fonts or text smoothing
+  --windows-fonts      also switch to Windows-like fonts (Selawik, Consolas) and greyscale
+                       text smoothing; without it, Ubuntu's fonts are left alone
   --no-hibernate       do not set up hibernation (no swapfile change, no resume boot option)
   --no-zswap           do not switch on compressed swap (zswap)
   --no-speaker-tuning  fix the woofers only; do not add the Dolby sound profile
@@ -148,7 +149,7 @@ for arg in "$@"; do
     case "$arg" in
         --undo) MODE=undo ;;
         --keep-desktop) KEEP_DESKTOP=1 ;;
-        --keep-fonts) KEEP_FONTS=1 ;;
+        --windows-fonts) WITH_FONTS=1 ;;
         --no-hibernate) WITH_HIBERNATE=0 ;;
         --no-zswap) WITH_ZSWAP=0 ;;
         --no-speaker-tuning) WITH_SPEAKER_TUNING=0 ;;
@@ -671,7 +672,8 @@ tune_desktop() {
 }
 
 # ---------------------------------------------------------------------------
-# Fonts. Coming from Windows, Ubuntu's text looks unfamiliar and, in browsers
+# Fonts (optional, only with --windows-fonts). Ubuntu's own fonts are the
+# default. Coming from Windows, Ubuntu's text looks unfamiliar and, in browsers
 # and Electron applications on this OLED panel, slightly coloured at the edges.
 #  - Selawik (Microsoft's open stand-in for Segoe UI, shipped in this kit)
 #    becomes the interface font and stands in wherever Segoe UI is asked for.
@@ -691,8 +693,8 @@ user_copy() {
 
 setup_fonts() {
     say "Fonts (Windows-like, cleaner on the OLED panel)"
-    if [ "$KEEP_FONTS" -eq 1 ]; then
-        skip "left alone (--keep-fonts)"
+    if [ "$WITH_FONTS" -eq 0 ]; then
+        skip "Ubuntu's own fonts left as they are (add --windows-fonts for Selawik and Consolas)"
         return
     fi
     if ! find_desktop_user; then
