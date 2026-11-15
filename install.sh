@@ -798,6 +798,26 @@ setup_face_login() {
         fi
     fi
 
+    # Howdy needs three face-recognition model files that its package does not ship; the
+    # first "howdy add" otherwise stops and asks you to run this download script.
+    local dlib=/etc/howdy/dlib-data f missing=0
+    for f in dlib_face_recognition_resnet_model_v1.dat mmod_human_face_detector.dat shape_predictor_5_face_landmarks.dat; do
+        [ -s "$dlib/$f" ] || missing=1
+    done
+    if [ "$missing" -eq 0 ]; then
+        skip "face-recognition model files (already downloaded)"
+    elif [ ! -x "$dlib/install.sh" ]; then
+        warn "$dlib/install.sh not found; the first 'sudo howdy add' will say how to get the model files"
+    else
+        apt_install_each bzip2 >/dev/null
+        echo "   ...   downloading Howdy's face-recognition model files (about 30 MB)"
+        if (cd "$dlib" && ./install.sh >/dev/null 2>&1); then
+            ok "face-recognition model files downloaded into $dlib"
+        else
+            warn "could not download the model files; run: cd $dlib && sudo ./install.sh"
+        fi
+    fi
+
     if grep -qs pam_howdy /etc/pam.d/common-auth; then
         ok "login, lock screen and sudo try your face first, then ask for the password"
     else
