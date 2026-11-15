@@ -65,6 +65,14 @@ def plan(percent, supported):
     return display, text
 
 
+SOFT_NOTE = ("Note: at a display scale that is not 100% or 200%, older applications (DBeaver and other "
+             "GTK 3 programs) are drawn at 200% and shrunk, which softens their text.")
+
+
+def is_fractional(scale):
+    return abs(scale - round(scale)) > 0.01
+
+
 def show_status():
     _serial, logical, modes = read_state(display_config())
     text = text_settings().get_double("text-scaling-factor")
@@ -74,6 +82,8 @@ def show_status():
         mark = " (primary)" if primary else ""
         print(f"display {names}{mark}: {round(scale * 100)}% x text {text:.2f} = {round(scale * text * 100)}%")
         print(f"  display scales GNOME offers here: {steps}")
+        if is_fractional(scale):
+            print(f"  {SOFT_NOTE}")
 
 
 def apply(percent, dry_run, chosen=None):
@@ -114,6 +124,9 @@ def apply(percent, dry_run, chosen=None):
     else:
         display, text = plan(percent, supported)
     print(f"{round(display * text * 100)}% = {round(display * 100)}% display x {text:.2f} text")
+    if is_fractional(display):
+        print(SOFT_NOTE)
+        print(f"For the same text size drawn sharply everywhere:  yoga-scale {round(display * text * 100)}")
 
     if abs(display - old_scale) > 0.001:
         config = GLib.Variant(

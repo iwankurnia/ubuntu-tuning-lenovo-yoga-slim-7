@@ -167,7 +167,7 @@ The two ways to reach about 110% differ in what stays large:
 | `yoga-scale 110` (100% display x 1.10 text) | small, at 100% | 110% |
 | `yoga-scale 125x0.9` (125% display x 0.90 text) | large, at 125% | about 112% |
 
-A 100% display scale is drawn pixel for pixel, which is the sharpest and the lightest on the graphics chip. At 125% GNOME draws larger and scales the picture down, which costs a little sharpness in older applications.
+**For clean text, prefer the plain form (`yoga-scale 110`, `yoga-scale 112`).** A 100% display is drawn pixel for pixel. At 125%, newer applications (GNOME's own, Brave, Electron) still draw sharply, but older ones cannot draw at 125% at all: GTK 3 programs such as DBeaver draw at 200% and GNOME shrinks the picture, which blurs their text. Measured on this laptop with the same font and size, the edges of DBeaver's letters have about a third less contrast at `125x0.9` than at `112`. No font setting changes that; only a whole-number display scale does. `yoga-scale` prints a note whenever you choose a display scale with this effect.
 
 With an external monitor connected, the display scale is left alone and only the text scaling is adjusted.
 
