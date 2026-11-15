@@ -34,6 +34,9 @@ First run on an 83CV with Ubuntu 26.10 (kernel 7.3.0), 2026-11-15:
 | Claude Desktop 5.11492.5, Claude Code 2.1.311 | Installed and running. |
 | Speaker sound profile | **Failed on the first run**: PipeWire could not load LV2 plugins. The missing package (`libspa-0.2-modules-extra`) is now installed by the script; not yet confirmed. |
 | Compressed swap (zswap) | Added after this run; not yet confirmed. |
+| Swapfile at 150% of the RAM (22 GiB) | Added after this run; not yet confirmed. The replacement was tested with simulated commands only. |
+| `yoga-scale` | Works: 110, 112, 120, `125x0.9` and `125x0.8` were all applied on the laptop. |
+| `--windows-fonts` | Tried on the laptop and rendered correctly in a test window; the owner went back to Ubuntu's fonts, so it is off by default. |
 | Plain suspend (S0ix) and idle battery draw | Not measured yet. |
 
 ## What it changes
@@ -59,7 +62,7 @@ First run on an 83CV with Ubuntu 26.10 (kernel 7.3.0), 2026-11-15:
 | Change | Why | Where |
 |---|---|---|
 | Swapfile sized at 150% of the RAM (22 GiB here) | Hibernation writes the whole memory to swap, and needs room on top of that for what is already swapped out. If an existing swap area is already that big it is used as it is; otherwise the swapfile is replaced, or `/swap.img` is created. While it is replaced a temporary swapfile takes over, so it works with memory nearly full. | `/swap.img`, `/etc/fstab` (old copy in `/etc/fstab.yoga-slim7.bak`) |
-| Resume boot option | Tells the kernel where the saved image is. | `/etc/default/grub.d/91-yoga-slim7-hibernate.cfg`, `/etc/initramfs-tools/conf.d/yoga-slim7-resume` |
+| Resume boot option | Tells the kernel where the saved image is. | `/etc/default/grub.d/91-yoga-slim7-hibernate.cfg`, and for the early boot image `/etc/dracut.conf.d/90-yoga-slim7-resume.conf` (Ubuntu 26.10 uses dracut; on installs with initramfs-tools it is `/etc/initramfs-tools/conf.d/yoga-slim7-resume`) |
 | Lid action | Set by you with `yoga-power lid ...` after the test passes. | `/etc/systemd/logind.conf.d/90-yoga-slim7-lid.conf` |
 
 **Secure Boot must be off.** Ubuntu's kernel refuses to hibernate while Secure Boot is on. If it is on, the script says so and skips this part; switch it off in the BIOS setup (F2 at power-on, Security, Secure Boot) and run the script again. If Windows with BitLocker is still on the disk, have its recovery key ready before changing this.
@@ -117,6 +120,7 @@ sudo bash install.sh --no-face-login  # do not install Howdy
 sudo bash install.sh --no-claude      # do not install Claude Desktop and Claude Code
 sudo bash install.sh --keep-keyring   # keep the keyring locked by your login password
 sudo bash install.sh --no-lpmd        # do not install intel-lpmd
+sudo bash install.sh --force          # run on a laptop that is not an 83CV (not tested anywhere else)
 ```
 
 Running the script again is safe. If you changed a desktop option back after the first run (for example from the dark style to the light one), the script leaves your choice alone.
@@ -128,7 +132,7 @@ Edit `/etc/yoga-power.conf`, then run `sudo yoga-power apply`:
 - `ON_BATTERY_PROFILE=balanced` if Power Saver feels too slow when unplugged.
 - `BATTERY_NO_TURBO=1` to switch CPU turbo boost off on battery: more runtime under load, slower bursts.
 
-A profile you pick by hand (Fn+Q or the GNOME menu) stays until the charger is next plugged in or pulled out.
+A profile you pick by hand (Fn+Q or the GNOME menu) stays until the settings are next applied: when the charger is plugged in or pulled out, after waking from sleep, at boot, and when `install.sh` runs.
 
 ## Checking that it works
 
@@ -190,7 +194,7 @@ fc-match "Segoe UI"      # Selawik
 fc-match monospace       # Consolas
 ```
 
-If text looks too soft with greyscale smoothing and you want Ubuntu's colour smoothing back, remove the last two `<match>` blocks from the rules file and run:
+If text looks too soft with greyscale smoothing and you want Ubuntu's colour smoothing back, remove the last two `<match>` blocks from the rules file (the script keeps a rules file you have edited) and run:
 
 ```bash
 gsettings set org.gnome.desktop.interface font-antialiasing rgba
@@ -307,7 +311,7 @@ The script installs both from Anthropic's own apt repositories, so they update w
 How it is done:
 
 - **Signing key check:** before either repository is trusted, the script downloads Anthropic's signing key and compares its fingerprint with the published one (`31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE`). If it differs, nothing is installed.
-- **Release channel:** Claude Code comes from the `stable` channel, about a week behind the newest release. To follow every release, change `stable stable` to `latest latest` in `/etc/apt/sources.list.d/claude-code.list`.
+- **Release channel:** Claude Code comes from the `stable` channel, about a week behind the newest release. To follow every release, change `stable stable` to `latest latest` in `/etc/apt/sources.list.d/claude-code.list`; the script leaves that line alone once it exists.
 - **Cowork:** it runs its tasks in a virtual machine, so the script adds you to the `kvm` group. Log out and back in once for that to apply.
 
 After the install, open Claude and sign in, then run `claude` in a terminal and sign in there too. Your settings, skills and session history are not copied from Windows; they live in `~/.claude` and have to be brought over separately.
@@ -331,4 +335,12 @@ Skip both with `--no-claude`.
 sudo bash install.sh --undo
 ```
 
-This removes every file listed above, the sound profile, Howdy (with its PPA) and both Claude packages (with their repositories; `~/.claude` is kept), the font rules (the Selawik files stay), and puts your previous desktop settings back, fonts included. Closing the lid suspends again. Ordinary Ubuntu packages stay installed and the swapfile keeps its new size. Reboot afterwards.
+This removes the files the script wrote, the sound profile, Howdy (with its PPA), both Claude packages with their repositories and signing keys (`~/.claude` is kept), and the font rules (the Selawik files stay). It puts your previous desktop settings back, fonts included, and closing the lid suspends again.
+
+What stays, on purpose:
+
+- **Ordinary Ubuntu packages** that were installed.
+- **The swapfile** at its new size, with its line in `/etc/fstab`. The `fstab` from before the kit is kept as `/etc/fstab.yoga-slim7.bak`.
+- **Your membership of the `kvm` group**, if an earlier version of this kit added it. Versions from 2026-11-15 on remember adding it and take it back.
+
+The script says so if something could not be undone. Reboot afterwards.

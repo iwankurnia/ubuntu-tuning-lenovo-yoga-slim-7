@@ -177,9 +177,18 @@ apply() {
         *) echo $((wb * 100)) > "$PROC/sys/vm/dirty_writeback_centisecs" 2>/dev/null ;;
     esac
 
-    # Turbo boost is only touched when the config asks for it to go off on battery.
-    if [ "$BATTERY_NO_TURBO" = 1 ] && [ -e "$SYS/devices/system/cpu/intel_pstate/no_turbo" ]; then
-        echo "$turbo" > "$SYS/devices/system/cpu/intel_pstate/no_turbo" 2>/dev/null
+    # Turbo boost is switched off on battery only when the config asks for it,
+    # and switched back on only if this tool was what switched it off. The
+    # marker lives in /run, which is emptied at boot, as is the turbo setting.
+    local no_turbo="$SYS/devices/system/cpu/intel_pstate/no_turbo" marker="$ROOT/run/yoga-power.turbo-off"
+    if [ -e "$no_turbo" ]; then
+        if [ "$BATTERY_NO_TURBO" = 1 ] && [ "$turbo" = 1 ]; then
+            mkdir -p "$ROOT/run" 2>/dev/null
+            echo 1 > "$no_turbo" 2>/dev/null && : > "$marker"
+        elif [ -e "$marker" ]; then
+            echo 0 > "$no_turbo" 2>/dev/null
+            rm -f "$marker"
+        fi
     fi
 
     local msg="on $mode: profile $done_profile, disk flush every ${wb}s"

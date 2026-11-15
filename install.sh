@@ -34,6 +34,7 @@ LID_CONF=/etc/systemd/logind.conf.d/90-yoga-slim7-lid.conf     # written by "yog
 SLEEP_CONF=/etc/systemd/sleep.conf.d/90-yoga-slim7.conf        # written by "yoga-power lid"
 HIB_SWAP=""
 HIB_SWAP_TYPE=""
+HIB_SWAP_REPLACED=0
 SWAP_PERCENT=150       # size of the swapfile, as a percentage of the RAM
 
 # Speaker sound tuning (Dolby profile rebuilt as a PipeWire filter)
@@ -84,6 +85,7 @@ CLAUDE_CODE_KEY_URL=https://downloads.claude.ai/keys/claude-code.asc
 CLAUDE_CODE_KEY=/etc/apt/keyrings/claude-code.asc
 CLAUDE_CODE_LIST=/etc/apt/sources.list.d/claude-code.list
 CLAUDE_MARKER=$STATE_DIR/claude-installed-by-kit
+KVM_MARKER=$STATE_DIR/kvm-added-by-kit
 
 # Everything here is in the Ubuntu 26.10 archive (checked 2026-11-15).
 PACKAGES=(
@@ -142,6 +144,9 @@ Usage: sudo bash install.sh [--undo] [--keep-desktop] [--windows-fonts] [--no-hi
                        password, and asks for it after a face login)
   --no-lpmd            do not install intel-lpmd (Intel's workload-aware CPU daemon)
   --force              run even if this is not a Yoga Slim 7 14IMH9 (83CV)
+  -h, --help           show this text
+
+With --undo the other options are ignored.
 EOF
 }
 
@@ -391,22 +396,43 @@ make_swapfile() {
 }
 
 ensure_hibernate_swap() {
-    local need_gib=$1 name type size file="" replacing=0
+    local need_gib=$1 name type size file="" leftover="" big="" big_type="" big_size=0 made_tmp=0
     # A swap area reports slightly less than the size of its file (one header page).
     local need_bytes=$(( need_gib * 1073741824 - 1048576 ))
+    HIB_SWAP_REPLACED=0
     while read -r name type size; do
         [ -n "$name" ] || continue
-        if [ "$size" -ge "$need_bytes" ]; then
-            HIB_SWAP=$name
-            HIB_SWAP_TYPE=$type
-            skip "$name is already large enough ($(( (size + 1048576) / 1073741824 )) GiB)"
-            return 0
+        case "$name" in
+            # Left behind by an earlier run that was interrupted. It is never the
+            # swap area to hibernate to: it is not in /etc/fstab.
+            *.tmp) leftover=$name; continue ;;
+        esac
+        if [ "$size" -ge "$need_bytes" ] && [ -z "$big" ]; then
+            big=$name; big_type=$type; big_size=$size
         fi
         [ "$type" = file ] && [ -z "$file" ] && file=$name
     done < <(swapon --show=NAME,TYPE,SIZE --bytes --noheadings 2>/dev/null)
 
-    if [ -n "$file" ]; then replacing=1; else file=/swap.img; fi
+    if [ -n "$big" ]; then
+        if [ -n "$leftover" ] && [ "$leftover" = "$big.tmp" ]; then
+            swapoff "$leftover" 2>/dev/null && rm -f "$leftover" && ok "removed the leftover temporary swapfile $leftover"
+        fi
+        HIB_SWAP=$big
+        HIB_SWAP_TYPE=$big_type
+        skip "$big is already large enough ($(( (big_size + 1048576) / 1073741824 )) GiB)"
+        return 0
+    fi
+
+    local old_active=0
+    if [ -n "$file" ]; then
+        old_active=1
+    elif [ -n "$leftover" ]; then
+        file=${leftover%.tmp}                # the earlier run got as far as switching the old file off
+    else
+        file=/swap.img
+    fi
     local dir tmp="$file.tmp" avail_kib fstype space_gib
+    [ "$leftover" = "$tmp" ] || leftover=""  # somebody else's .tmp swap is not ours to touch
     dir=$(dirname "$file")
     fstype=$(findmnt -no FSTYPE -T "$dir" 2>/dev/null)
     if [ "$fstype" != ext4 ]; then
@@ -414,38 +440,46 @@ ensure_hibernate_swap() {
         return 1
     fi
     # Replacing a swapfile needs room for a temporary one as well, and 10 GiB must stay free.
-    space_gib=$(( need_gib * (replacing + 1) + 10 ))
-    avail_kib=$(df --output=avail -k "$dir" | tail -n 1 | tr -d ' ')
+    space_gib=$(( need_gib + 10 ))
+    [ "$old_active" -eq 1 ] && [ -z "$leftover" ] && space_gib=$(( space_gib + need_gib ))
+    avail_kib=$(df --output=avail -k "$dir" 2>/dev/null | tail -n 1 | tr -d ' ')
+    case "$avail_kib" in
+        ''|*[!0-9]*) warn "could not read the free disk space of $dir; the swap was left untouched"; return 1 ;;
+    esac
     if [ "$avail_kib" -lt $(( space_gib * 1048576 )) ]; then
         warn "not enough free disk space for a ${need_gib} GiB swapfile (free: $((avail_kib / 1048576)) GiB, needed while it is built: $space_gib GiB)"
         return 1
     fi
 
-    if [ "$replacing" -eq 1 ]; then
+    if [ "$old_active" -eq 1 ]; then
         # Whatever is in swap right now has to go somewhere while the old file
         # is switched off. A temporary swapfile takes it, so this works even
         # when memory is nearly full.
-        if ! make_swapfile "$tmp" "$need_gib" || ! swapon -p 1 "$tmp"; then
-            rm -f "$tmp"
-            warn "could not create a temporary swapfile; the existing swap was left untouched"
-            return 1
+        if [ -z "$leftover" ]; then
+            if ! make_swapfile "$tmp" "$need_gib" || ! swapon -p 1 "$tmp"; then
+                rm -f "$tmp"
+                warn "could not create a temporary swapfile; the existing swap was left untouched"
+                return 1
+            fi
+            made_tmp=1
         fi
         if ! swapoff "$file"; then
-            swapoff "$tmp" 2>/dev/null
-            rm -f "$tmp"
+            if [ "$made_tmp" -eq 1 ]; then swapoff "$tmp" 2>/dev/null; rm -f "$tmp"; fi
             warn "could not switch off $file; the existing swap was left untouched"
             return 1
         fi
     fi
+    # From here on the old swapfile is gone, so the boot options must follow.
+    HIB_SWAP_REPLACED=1
     if ! make_swapfile "$file" "$need_gib" || ! swapon -p 100 "$file"; then
-        if [ "$replacing" -eq 1 ]; then
+        if [ "$made_tmp" -eq 1 ] || [ -n "$leftover" ]; then
             warn "could not create the new $file. Swap is running from $tmp until the next reboot; run this script again before rebooting."
         else
             warn "could not create ${need_gib} GiB swapfile $file"
         fi
         return 1
     fi
-    if [ "$replacing" -eq 1 ]; then
+    if [ "$made_tmp" -eq 1 ] || [ -n "$leftover" ]; then
         if swapoff "$tmp"; then
             rm -f "$tmp"
         else
@@ -463,6 +497,21 @@ ensure_hibernate_swap() {
     HIB_SWAP=$file
     HIB_SWAP_TYPE=file
     ok "swapfile $file is now ${need_gib} GiB (old /etc/fstab saved as $FSTAB_BACKUP)"
+}
+
+# The swapfile changed but the boot options could not be brought in line with
+# it. A hibernation would then save your work to a place the next boot does
+# not look in. So the lid goes back to plain suspend until this is repaired.
+hibernate_unsafe() {
+    warn "$1"
+    [ "$HIB_SWAP_REPLACED" -eq 1 ] || return 0
+    if [ -f "$LID_CONF" ]; then
+        rm -f "$LID_CONF" "$SLEEP_CONF"
+        systemctl kill -s HUP systemd-logind 2>/dev/null
+        warn "closing the lid now suspends instead of hibernating, so that no open work can be lost. Fix the problem above, run this script again, then: sudo yoga-power lid hibernate"
+    else
+        warn "do not hibernate until this script has run again without this warning"
+    fi
 }
 
 setup_hibernate() {
@@ -490,29 +539,40 @@ setup_hibernate() {
     # the RAM size; the rest is room for what is already swapped out.
     need_gib=$(( (mem_kib * SWAP_PERCENT / 100 + 1048575) / 1048576 ))
 
-    ensure_hibernate_swap "$need_gib" || return
+    if ! ensure_hibernate_swap "$need_gib"; then
+        [ "$HIB_SWAP_REPLACED" -eq 1 ] && hibernate_unsafe "the swapfile is only half replaced"
+        return
+    fi
 
     if [ "$HIB_SWAP_TYPE" = file ]; then
         uuid=$(findmnt -no UUID -T "$HIB_SWAP" 2>/dev/null)
         # Where the file starts on the disk, counted in filesystem blocks.
         offset=$(filefrag -v "$HIB_SWAP" 2>/dev/null | awk '$1 == "0:" { gsub(/\./, "", $4); print $4; exit }')
         case "$offset" in
-            ''|*[!0-9]*) warn "could not read where $HIB_SWAP starts on the disk; hibernation was not set up"; return ;;
+            ''|*[!0-9]*) hibernate_unsafe "could not read where $HIB_SWAP starts on the disk; hibernation was not set up"; return ;;
         esac
         params="resume=UUID=$uuid resume_offset=$offset"
-        # Tell the running kernel as well. Otherwise a swapfile that was just
-        # replaced could not be hibernated to until the next reboot, and closing
-        # the lid would leave the laptop running.
-        if [ -w /sys/power/resume_offset ]; then
-            echo "$offset" > /sys/power/resume_offset 2>/dev/null \
-                || warn "could not update the running kernel; reboot before closing the lid"
-        fi
     else
         uuid=$(blkid -s UUID -o value "$HIB_SWAP" 2>/dev/null)
         params="resume=UUID=$uuid"
     fi
     if [ -z "$uuid" ]; then
-        warn "could not read the disk identifier for $HIB_SWAP; hibernation was not set up"
+        hibernate_unsafe "could not read the disk identifier for $HIB_SWAP; hibernation was not set up"
+        return
+    fi
+    # Tell the running kernel as well. Otherwise a swapfile that was just
+    # replaced could not be hibernated to until the next reboot, and closing
+    # the lid would leave the laptop running.
+    if [ "$HIB_SWAP_TYPE" = file ] && [ -w /sys/power/resume_offset ]; then
+        echo "$offset" > /sys/power/resume_offset 2>/dev/null \
+            || warn "could not update the running kernel; reboot before closing the lid"
+    fi
+
+    # Nothing to do when this boot already used exactly these options.
+    if [ "$HIB_SWAP_REPLACED" -eq 0 ] && grep -qsF " $params\"" "$HIB_GRUB" \
+            && grep -qF "$params" /proc/cmdline \
+            && { [ ! -d /usr/lib/dracut/modules.d ] || [ -f "$HIB_DRACUT" ]; }; then
+        skip "boot option already in place: $params"
         return
     fi
 
@@ -523,6 +583,8 @@ setup_hibernate() {
 # Run install.sh again if the swapfile is ever recreated: its position changes.
 GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT $params"
 EOF
+    # The early boot image has to know how to resume. Ubuntu builds it with
+    # dracut or, on older installs, initramfs-tools; each has its own switch.
     if [ -d /etc/initramfs-tools/conf.d ]; then
         echo "RESUME=UUID=$uuid" > "$HIB_INITRAMFS"
     fi
@@ -532,15 +594,19 @@ EOF
     fi
 
     if ! update-grub >/dev/null 2>&1; then
-        rm -f "$HIB_GRUB"
-        warn "update-grub failed; hibernation was not set up"
+        # The file above is correct, so it stays; only the boot menu is stale.
+        hibernate_unsafe "update-grub failed, so the boot menu still has the old options. Run: sudo update-grub"
         return
     fi
     if command -v update-initramfs >/dev/null; then
         update-initramfs -u -k all >/dev/null 2>&1 || warn "update-initramfs failed; resume from hibernation may not work"
     fi
     ok "boot option added: $params"
-    ok "hibernation is set up. It is NOT tied to the lid yet: reboot, then run  sudo yoga-power hibernate-test"
+    if [ -f "$LID_CONF" ]; then
+        ok "hibernation is set up; closing the lid keeps the action you chose ($(awk -F= '$1 == "HandleLidSwitch" { print $2 }' "$LID_CONF"))"
+    else
+        ok "hibernation is set up. It is NOT tied to the lid yet: reboot, then run  sudo yoga-power hibernate-test"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -633,8 +699,8 @@ gs_set() {
         skip "$2 (you set it to $old after the first run; left alone)"
         return
     fi
-    printf '%s|%s|%s\n' "$1" "$2" "$old" >> "$GS_BACKUP"
     if as_user gsettings set "$1" "$2" "$3" 2>/dev/null; then
+        printf '%s|%s|%s\n' "$1" "$2" "$old" >> "$GS_BACKUP"
         ok "$2 = $3 (was $old)"
     else
         warn "could not set $2"
@@ -721,9 +787,14 @@ setup_fonts() {
         [ "$rc" -eq 0 ] && written=$((written + 1))
         [ "$rc" -eq 2 ] && { warn "could not install $(basename "$f")"; return; }
     done
-    user_copy "$src/$FONT_CONF_NAME" "$conf_dir/$FONT_CONF_NAME"; rc=$?
-    [ "$rc" -eq 0 ] && written=$((written + 1))
-    [ "$rc" -eq 2 ] && { warn "could not install $FONT_CONF_NAME"; return; }
+    if as_user test -f "$conf_dir/$FONT_CONF_NAME" && ! as_user cmp -s - "$conf_dir/$FONT_CONF_NAME" < "$src/$FONT_CONF_NAME"; then
+        # You edited the rules (the README shows how, to get colour smoothing back).
+        skip "font rules: your edited $FONT_CONF_NAME was kept (delete it and run again for the kit's version)"
+    else
+        user_copy "$src/$FONT_CONF_NAME" "$conf_dir/$FONT_CONF_NAME"; rc=$?
+        [ "$rc" -eq 0 ] && written=$((written + 1))
+        [ "$rc" -eq 2 ] && { warn "could not install $FONT_CONF_NAME"; return; }
+    fi
     if [ "$written" -gt 0 ]; then
         as_user fc-cache -f "$DESK_HOME/.local/share/fonts" 2>/dev/null
         ok "Selawik and the font rules installed in your home folder ($written file(s) written)"
@@ -840,8 +911,12 @@ remove_speaker_sound() {
         return 1
     fi
     if find_desktop_user "$(cat "$GS_USER_FILE" 2>/dev/null)"; then
-        as_user sh -c 'cd "$HOME" && python3 "$1" --uninstall --yes' sh "$SPEAKER_TOOL_DIR/dolby_to_pipewire.py" </dev/null \
-            && ok "sound profile removed" || warn "could not remove the sound profile"
+        if as_user sh -c 'cd "$HOME" && python3 "$1" --uninstall --yes' sh "$SPEAKER_TOOL_DIR/dolby_to_pipewire.py" </dev/null; then
+            ok "sound profile removed"
+        else
+            warn "could not remove the sound profile; the converter was kept in $OPT_DIR so that --undo can be run again"
+            return 1
+        fi
     else
         warn "sound profile not removed: run --undo with sudo from a terminal inside GNOME"
         return 1
@@ -1185,8 +1260,14 @@ add_claude_repo() {
         warn "$1: the downloaded signing key is not Anthropic's ($CLAUDE_KEY_FPR); nothing was installed"
         return 1
     fi
-    echo "$5" > "$4"
-    ok "$1: signing key verified, repository added"
+    if grep -qsF "signed-by=$3" "$4"; then
+        # Already set up. The line is left as it is, so a release channel you
+        # changed by hand (stable to latest) survives a re-run.
+        skip "$1: repository already set up (signing key verified again)"
+    else
+        echo "$5" > "$4"
+        ok "$1: signing key verified, repository added"
+    fi
 }
 
 setup_claude() {
@@ -1198,7 +1279,14 @@ setup_claude() {
     apt_install_each curl gnupg || return
     mkdir -p "$STATE_DIR" /etc/apt/keyrings
 
-    local have_desktop=0 have_code=0
+    # If Claude was already installed before this kit ever ran, it is yours:
+    # --undo must not remove it.
+    local have_desktop=0 have_code=0 pkg own_install=0
+    if [ ! -f "$CLAUDE_MARKER" ]; then
+        for pkg in claude-desktop claude-code; do
+            dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' && own_install=1
+        done
+    fi
     add_claude_repo "Claude Desktop" "$CLAUDE_DESKTOP_KEY_URL" "$CLAUDE_DESKTOP_KEY" "$CLAUDE_DESKTOP_LIST" \
         "deb [arch=amd64,arm64 signed-by=$CLAUDE_DESKTOP_KEY] https://downloads.claude.ai/claude-desktop/apt/stable stable main" \
         && have_desktop=1
@@ -1207,7 +1295,7 @@ setup_claude() {
         "deb [signed-by=$CLAUDE_CODE_KEY] https://downloads.claude.ai/claude-code/apt/stable stable main" \
         && have_code=1
     [ "$have_desktop" -eq 1 ] || [ "$have_code" -eq 1 ] || return
-    touch "$CLAUDE_MARKER"
+    [ "$own_install" -eq 1 ] || touch "$CLAUDE_MARKER"
     apt-get update -q >/dev/null 2>&1 || warn "apt-get update reported a problem"
 
     if [ "$have_desktop" -eq 1 ]; then
@@ -1234,6 +1322,7 @@ setup_claude() {
         if id -nG "$user" | tr ' ' '\n' | grep -qx kvm; then
             skip "$user is already in the kvm group"
         elif usermod -aG kvm "$user"; then
+            echo "$user" > "$KVM_MARKER"
             ok "$user added to the kvm group for Cowork (takes effect after you log out and in)"
         else
             warn "could not add $user to the kvm group; Cowork may report a permission problem"
@@ -1245,7 +1334,11 @@ remove_claude() {
     [ -f "$CLAUDE_MARKER" ] || return 0
     apt-get remove -y -q claude-desktop claude-code >/dev/null 2>&1 && ok "claude-desktop and claude-code removed" \
         || warn "could not remove claude-desktop / claude-code"
-    rm -f "$CLAUDE_DESKTOP_LIST" "$CLAUDE_CODE_LIST" "$CLAUDE_CODE_KEY" "$CLAUDE_MARKER"
+    rm -f "$CLAUDE_DESKTOP_LIST" "$CLAUDE_CODE_LIST" "$CLAUDE_CODE_KEY" "$CLAUDE_DESKTOP_KEY" "$CLAUDE_MARKER"
+    if [ -f "$KVM_MARKER" ]; then
+        gpasswd -d "$(cat "$KVM_MARKER")" kvm >/dev/null 2>&1 && ok "$(cat "$KVM_MARKER") removed from the kvm group"
+        rm -f "$KVM_MARKER"
+    fi
     echo "   note  your Claude settings and history in ~/.claude were kept"
 }
 
@@ -1398,7 +1491,13 @@ undo() {
     remove_fonts
     restore_desktop
     echo
-    echo "Done. Packages were left installed, and the swapfile was left at its current size."
+    if [ "$WARNINGS" -gt 0 ]; then
+        echo "Finished with $WARNINGS warning(s): some things could not be undone; see the WARN lines above."
+    else
+        echo "Done."
+    fi
+    echo "Ordinary packages were left installed. The swapfile keeps its size and its /etc/fstab line"
+    echo "(the fstab from before the kit is in $FSTAB_BACKUP)."
     echo "Closing the lid suspends again. Reboot to return to Ubuntu's defaults."
 }
 
