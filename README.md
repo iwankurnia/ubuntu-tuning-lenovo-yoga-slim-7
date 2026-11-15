@@ -89,6 +89,7 @@ To use a different size, change `SWAP_PERCENT` at the top of `install.sh`; the s
 | Tool | What it does | Where |
 |---|---|---|
 | `yoga-power` | Status, real battery draw, charge limit, suspend reports. | `/usr/local/bin/yoga-power` |
+| `yoga-scale` | In-between screen sizes such as 110% or 120%, which GNOME's Settings does not offer. | `/usr/local/bin/yoga-scale` |
 | Suspend report | Logs every suspend: duration, how deep the sleep was, battery used. | `/usr/lib/systemd/system-sleep/yoga-sleep-report` |
 
 Everything the script does is logged to `/var/log/yoga-slim7-tuning.log`.
@@ -130,6 +131,25 @@ To judge `intel-lpmd`, compare `yoga-power measure` with it running and after `s
 
 A healthy suspend report looks like `slept 8h02m10s, S0ix 97%, used 1.90 Wh (236 mW average)`.
 If S0ix stays near 0%, something is keeping the laptop awake while the lid is closed.
+
+## Screen size in between GNOME's steps
+
+GNOME's Settings offers 100%, 125%, 133%, 150% and so on, but nothing in between. `yoga-scale` reaches any size by combining the display scale with GNOME's text scaling:
+
+```bash
+yoga-scale status      # what is set now
+yoga-scale 110         # 100% display x 1.10 text
+yoga-scale 120         # 100% display x 1.20 text
+yoga-scale 125         # back to plain 125%
+yoga-scale 120 --dry-run   # show the split and check GNOME accepts it, change nothing
+```
+
+It needs no `sudo`. How applications respond:
+
+- **Brave and Electron applications** (VS Code, Claude, Teams and the like) follow the combined size exactly.
+- **GNOME's own applications** scale their text, and the buttons and rows that hold it. Icons follow the display scale only, so at 110% or 120% they stay at their 100% size.
+
+With an external monitor connected, the display scale is left alone and only the text scaling is adjusted.
 
 ## Battery charge limit
 

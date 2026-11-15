@@ -22,6 +22,7 @@ GRUB_DROPIN=/etc/default/grub.d/90-yoga-slim7-power.cfg
 AUTO_UNIT=/etc/systemd/system/yoga-power-auto.service
 SLEEP_HOOK=/usr/lib/systemd/system-sleep/yoga-sleep-report
 HELPER=/usr/local/bin/yoga-power
+SCALE_HELPER=/usr/local/bin/yoga-scale
 CONFIG=/etc/yoga-power.conf
 
 # Hibernation
@@ -541,6 +542,10 @@ install_tools() {
     say "Helper tools and automatic battery/mains switching"
     install -D -m 755 "$KIT_DIR/files/yoga-power" "$HELPER" \
         && ok "installed $HELPER" || warn "could not install $HELPER"
+    install -D -m 755 "$KIT_DIR/files/yoga-scale" "$SCALE_HELPER" \
+        && ok "installed $SCALE_HELPER (in-between screen sizes such as 110% or 120%)" \
+        || warn "could not install $SCALE_HELPER"
+    sed -i 's/\r$//' "$SCALE_HELPER" 2>/dev/null
     install -D -m 755 "$KIT_DIR/files/yoga-sleep-report" "$SLEEP_HOOK" \
         && ok "installed $SLEEP_HOOK (logs every suspend to /var/log/yoga-sleep.log)" \
         || warn "could not install $SLEEP_HOOK"
@@ -1283,7 +1288,7 @@ undo() {
     systemctl disable --now yoga-power-auto.service >/dev/null 2>&1
     local f had_grub=0
     { [ -f "$GRUB_DROPIN" ] || [ -f "$HIB_GRUB" ]; } && had_grub=1
-    for f in "$AUDIO_CONF" "$SYSCTL_CONF" "$UDEV_RULES" "$NM_CONF" "$GRUB_DROPIN" "$AUTO_UNIT" "$SLEEP_HOOK" "$HELPER" "$CONFIG" \
+    for f in "$AUDIO_CONF" "$SYSCTL_CONF" "$UDEV_RULES" "$NM_CONF" "$GRUB_DROPIN" "$AUTO_UNIT" "$SLEEP_HOOK" "$HELPER" "$SCALE_HELPER" "$CONFIG" \
              "$HIB_GRUB" "$HIB_INITRAMFS" "$HIB_DRACUT" "$LID_CONF" "$SLEEP_CONF"; do
         if [ -e "$f" ]; then rm -f "$f" && ok "removed $f"; else skip "$f (not present)"; fi
     done

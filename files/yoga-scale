@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""yoga-scale: in-between screen scaling for GNOME, such as 110% or 120%.
+
+GNOME only offers a few fixed display scales (100%, 125%, 133%, 150%, ...).
+This command reaches any size in between by combining two settings:
+
+    size = display scale  x  text scaling
+
+It picks the largest display scale that is not above the size you ask for and
+makes up the rest with text scaling. 120% becomes 100% display x 1.20 text.
+
+Browsers and Electron applications (Brave, VS Code, Claude, Teams, ...) follow
+the combined size exactly. GNOME's own applications scale their text and the
+controls that hold text; their icons follow the display scale only.
+"""
+import argparse
+import sys
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+BUS_NAME = "org.gnome.Mutter.DisplayConfig"
+BUS_PATH = "/org/gnome/Mutter/DisplayConfig"
+VERIFY, PERSISTENT = 0, 2
+MIN_PERCENT, MAX_PERCENT = 80, 300
+MIN_TEXT, MAX_TEXT = 0.5, 3.0
+
+
+def display_config():
+    return Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SESSION, Gio.DBusProxyFlags.NONE, None, BUS_NAME, BUS_PATH, BUS_NAME, None
+    )
+
+
+def read_state(proxy):
+    """Returns (serial, logical monitors, {connector: (mode id, supported scales)})."""
+    serial, monitors, logical, _props = proxy.call_sync(
+        "GetCurrentState", None, Gio.DBusCallFlags.NONE, -1, None
+    ).unpack()
+    current_modes = {}
+    for (connector, _vendor, _product, _serial), modes, _mprops in monitors:
+        for mode_id, _w, _h, _rate, _preferred, supported, mode_props in modes:
+            if mode_props.get("is-current"):
+                current_modes[connector] = (mode_id, list(supported))
+    return serial, logical, current_modes
+
+
+def text_settings():
+    return Gio.Settings.new("org.gnome.desktop.interface")
+
+
+def plan(percent, supported):
+    """Splits PERCENT into (display scale, text scaling)."""
+    want = percent / 100.0
+    below = [s for s in supported if s <= want + 0.005]
+    display = max(below) if below else min(supported)
+    text = round(want / display, 2)
+    if abs(text - 1.0) < 0.012:      # 133% on a 1.3333 display scale is simply 1.0
+        text = 1.0
+    return display, text
+
+
+def show_status():
+    _serial, logical, modes = read_state(display_config())
+    text = text_settings().get_double("text-scaling-factor")
+    for _x, _y, scale, _transform, primary, specs, _props in logical:
+        names = ", ".join(spec[0] for spec in specs)
+        steps = ", ".join(f"{round(s * 100)}%" for s in modes.get(specs[0][0], (None, []))[1])
+        mark = " (primary)" if primary else ""
+        print(f"display {names}{mark}: {round(scale * 100)}% x text {text:.2f} = {round(scale * text * 100)}%")
+        print(f"  display scales GNOME offers here: {steps}")
+
+
+def apply(percent, dry_run):
+    if not MIN_PERCENT <= percent <= MAX_PERCENT:
+        sys.exit(f"choose a size between {MIN_PERCENT} and {MAX_PERCENT}")
+    proxy = display_config()
+    serial, logical, modes = read_state(proxy)
+    settings = text_settings()
+
+    if len(logical) != 1:
+        # Several screens: moving one changes where the others sit, so the
+        # display scale is left alone and only the text scaling is adjusted.
+        scale = next((lm[2] for lm in logical if lm[4]), logical[0][2])
+        text = round(percent / 100.0 / scale, 2)
+        if not MIN_TEXT <= text <= MAX_TEXT:
+            sys.exit(f"{percent}% cannot be reached from the current {round(scale * 100)}% display scale")
+        print(f"More than one screen is connected: the display scale stays at {round(scale * 100)}%.")
+        print(f"{percent}% = {round(scale * 100)}% display x {text:.2f} text")
+        if not dry_run:
+            settings.set_double("text-scaling-factor", text)
+            Gio.Settings.sync()
+        return
+
+    x, y, old_scale, transform, primary, specs, _props = logical[0]
+    connector = specs[0][0]
+    if connector not in modes:
+        sys.exit(f"could not read the current mode of {connector}")
+    mode_id, supported = modes[connector]
+    display, text = plan(percent, supported)
+    print(f"{percent}% = {round(display * 100)}% display x {text:.2f} text")
+
+    if abs(display - old_scale) > 0.001:
+        config = GLib.Variant(
+            "(uua(iiduba(ssa{sv}))a{sv})",
+            (serial, VERIFY if dry_run else PERSISTENT,
+             [(x, y, display, transform, primary, [(connector, mode_id, {})])], {}),
+        )
+        try:
+            proxy.call_sync("ApplyMonitorsConfig", config, Gio.DBusCallFlags.NONE, -1, None)
+        except GLib.Error as err:
+            sys.exit(f"GNOME refused the display scale {round(display * 100)}%: {err.message}")
+    if dry_run:
+        print("(dry run: GNOME accepts this; nothing was changed)")
+        return
+    settings.set_double("text-scaling-factor", text)
+    Gio.Settings.sync()
+    print("Applied. Applications that are already open may need a restart to redraw at the new size.")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="yoga-scale",
+        description="In-between screen scaling for GNOME (display scale x text scaling).",
+        epilog="Examples:  yoga-scale 110   yoga-scale 120   yoga-scale 125   yoga-scale status",
+    )
+    parser.add_argument("size", nargs="?", default="status",
+                        help="a percentage such as 110 or 120, or 'status' (the default)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="show what would be set and check that GNOME accepts it, without changing anything")
+    args = parser.parse_args()
+
+    if args.size == "status":
+        show_status()
+        return
+    try:
+        percent = float(args.size.rstrip("%"))
+    except ValueError:
+        parser.error(f"not a size: {args.size}")
+    apply(percent if percent != int(percent) else int(percent), args.dry_run)
+
+
+if __name__ == "__main__":
+    main()
