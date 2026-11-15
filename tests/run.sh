@@ -15,8 +15,9 @@ for f in install.sh files/yoga-power; do
 done
 sh -n files/yoga-sleep-report || { echo "syntax error in files/yoga-sleep-report"; failed=1; }
 python3 -m py_compile files/yoga-scale || failed=1
+python3 -m py_compile files/nautilus/open-with-vscode.py || failed=1
 find files -name __pycache__ -prune -exec rm -r {} + 2>/dev/null
-for f in install.sh files/yoga-power files/yoga-sleep-report files/yoga-scale; do
+for f in install.sh files/yoga-power files/yoga-sleep-report files/yoga-scale files/nautilus/open-with-vscode.py; do
     if [ "$(tr -cd '\r' < "$f" | wc -c)" -ne 0 ]; then
         echo "$f has Windows line endings"
         failed=1

@@ -91,6 +91,10 @@ CLAUDE_CODE_LIST=/etc/apt/sources.list.d/claude-code.list
 CLAUDE_MARKER=$STATE_DIR/claude-installed-by-kit
 KVM_MARKER=$STATE_DIR/kvm-added-by-kit
 
+# "Open with VS Code" in the Files right-click menu: a small extension in the user's home.
+CODE_MENU_NAME=open-with-vscode.py
+CODE_MENU_DIR=.local/share/nautilus-python/extensions      # inside the home folder
+
 LPMD_PACKAGE=intel-lpmd                               # Intel's workload-aware CPU tuning daemon
 MIN_UBUNTU=24.04                                      # oldest Ubuntu release the kit runs on
 
@@ -136,6 +140,8 @@ WITH_SPEAKER_TUNING=1
 WITH_FACE_LOGIN=1
 WITH_CLAUDE=1
 CLAUDE_READY=0
+WITH_CODE_MENU=1
+CODE_MENU_READY=0
 KEEP_KEYRING=0
 KEYRING_NAME=Default_keyring
 KEYRING_BACKUP=$STATE_DIR/keyring-default.before
@@ -161,7 +167,7 @@ usage() {
     cat <<'EOF'
 Usage: sudo bash install.sh [--undo] [--keep-desktop] [--windows-fonts] [--no-hibernate] [--no-zswap]
                             [--no-speaker-tuning] [--no-face-login] [--no-claude]
-                            [--keep-keyring] [--no-lpmd] [--force]
+                            [--no-code-menu] [--keep-keyring] [--no-lpmd] [--force]
 
   --undo               remove what this script set up and put the desktop options back
                        (ordinary packages and the enlarged swapfile are left in place)
@@ -173,6 +179,7 @@ Usage: sudo bash install.sh [--undo] [--keep-desktop] [--windows-fonts] [--no-hi
   --no-speaker-tuning  fix the woofers only; do not add the Dolby sound profile
   --no-face-login      do not install Howdy face login
   --no-claude          do not install Claude Desktop and the Claude Code CLI
+  --no-code-menu       do not add "Open with VS Code" to the Files right-click menu
   --keep-keyring       leave the password keyring alone (it stays locked by your login
                        password, and asks for it after a face login)
   --no-lpmd            do not install intel-lpmd (Intel's workload-aware CPU daemon)
@@ -194,6 +201,7 @@ for arg in "$@"; do
         --no-speaker-tuning) WITH_SPEAKER_TUNING=0 ;;
         --no-face-login) WITH_FACE_LOGIN=0 ;;
         --no-claude) WITH_CLAUDE=0 ;;
+        --no-code-menu) WITH_CODE_MENU=0 ;;
         --keep-keyring) KEEP_KEYRING=1 ;;
         --no-lpmd) WITH_LPMD=0 ;;
         --force) FORCE=1 ;;
@@ -1064,6 +1072,76 @@ remove_fonts() {
 }
 
 # ---------------------------------------------------------------------------
+# "Open with VS Code" in the Files right-click menu, for selected files and
+# folders and for the empty part of a folder; VS Code's own package adds no
+# such entry. It is a small Files (Nautilus) extension, put into the home
+# folder of the person who ran sudo and written as them. Files only reads it
+# when python3-nautilus is installed.
+vscode_installed() { command -v code >/dev/null 2>&1; }
+files_app_installed() { command -v nautilus >/dev/null 2>&1; }
+
+setup_code_menu() {
+    say "Files right-click menu (Open with VS Code)"
+    if [ "$WITH_CODE_MENU" -eq 0 ]; then
+        skip "left alone (--no-code-menu)"
+        return
+    fi
+    if ! files_app_installed; then
+        skip "the Files application (Nautilus) is not installed"
+        return
+    fi
+    if ! vscode_installed; then
+        skip "VS Code is not installed. Install it and run this script again to get the menu entry."
+        return
+    fi
+    if ! find_desktop_user; then
+        warn "no desktop session found. Run this script with sudo from a terminal inside GNOME to add the menu entry."
+        return
+    fi
+    local src="$KIT_DIR/files/nautilus/$CODE_MENU_NAME" dir="$DESK_HOME/$CODE_MENU_DIR" f rc
+    if [ ! -f "$src" ]; then
+        warn "the menu extension is missing from the kit (files/nautilus)"
+        return
+    fi
+    if pkg_installed python3-nautilus; then
+        skip "python3-nautilus (already installed)"
+    elif ! pkg_in_archive python3-nautilus; then
+        skip "python3-nautilus is not offered by this Ubuntu release, so the menu entry cannot be added"
+        return
+    elif apt-get install -y -q python3-nautilus >/dev/null; then
+        ok "python3-nautilus"
+    else
+        warn "could not install python3-nautilus; menu entry not added"
+        return
+    fi
+    for f in "$DESK_HOME/.local" "$DESK_HOME/.local/share" "$DESK_HOME/.local/share/nautilus-python" "$dir"; do
+        if [ -L "$f" ]; then
+            warn "$f is a link; menu entry not added"
+            return
+        fi
+    done
+    as_user mkdir -p "$dir" || { warn "could not create $dir"; return; }
+    user_copy "$src" "$dir/$CODE_MENU_NAME"; rc=$?
+    case "$rc" in
+        0) ok "\"Open with VS Code\" added to the Files right-click menu"
+           CODE_MENU_READY=1 ;;
+        1) skip "\"Open with VS Code\" menu entry (already in place)" ;;
+        *) warn "could not install $CODE_MENU_NAME" ;;
+    esac
+}
+
+remove_code_menu() {
+    local user home f
+    user=$(cat "$GS_USER_FILE" 2>/dev/null)
+    [ -n "$user" ] || user=${SUDO_USER:-}
+    [ -n "$user" ] && [ "$user" != root ] || return 0
+    home=$(getent passwd "$user" | cut -d: -f6)
+    f=$home/$CODE_MENU_DIR/$CODE_MENU_NAME
+    [ -f "$f" ] && [ ! -L "$f" ] || return 0
+    sudo -u "$user" rm -f "$f" && ok "removed $f" || warn "could not remove $f"
+}
+
+# ---------------------------------------------------------------------------
 # Speaker sound. The woofer fix makes all four speakers play; this adds the
 # sound profile Windows applies on top (Dolby's tuning for this exact laptop),
 # rebuilt as a PipeWire filter that loads every time sound starts.
@@ -1760,6 +1838,7 @@ undo() {
     remove_face_login
     remove_speaker_sound
     remove_fonts
+    remove_code_menu
     restore_desktop
     echo
     if [ "$WARNINGS" -gt 0 ]; then
@@ -1788,6 +1867,7 @@ install_tools
 setup_hibernate
 tune_desktop
 setup_fonts
+setup_code_menu
 tune_speaker_sound
 setup_face_login
 setup_keyring
@@ -1828,4 +1908,8 @@ if [ "$CLAUDE_READY" -eq 1 ]; then
 fi
 if [ "$FONTS_READY" -eq 1 ]; then
     echo "  -  applications that were open keep their old fonts until you restart them"
+fi
+if [ "$CODE_MENU_READY" -eq 1 ]; then
+    echo "  -  \"Open with VS Code\" shows in the Files right-click menu once Files has been restarted:"
+    echo "     log in again, or run: nautilus -q   (that closes its open windows)"
 fi

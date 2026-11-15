@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Desktop settings, fonts and the keyring: what is set on which kind of
-# screen, that a second run changes nothing, and that your own later changes
-# are respected.
+# Desktop settings, fonts, the Files menu entry and the keyring: what is set on
+# which kind of screen, that a second run changes nothing, and that your own
+# later changes are respected.
 set -u
 . "$(dirname "$0")/helpers.sh"
 
@@ -12,6 +12,8 @@ desktop_env() {
     KIT_DIR=$KIT; STATE_DIR=$W/state; GS_BACKUP=$STATE_DIR/gsettings.before; GS_USER_FILE=$STATE_DIR/desktop-user
     FONT_CONF_NAME=45-yoga-slim7-fonts.conf; FONT_SMOOTH_CONF_NAME=46-yoga-slim7-oled-smoothing.conf
     WITH_FONTS=${WITH_FONTS:-1}; KEEP_DESKTOP=${KEEP_DESKTOP:-0}; HW_OLED=${HW_OLED:-1}; FONTS_READY=0
+    CODE_MENU_NAME=open-with-vscode.py; CODE_MENU_DIR=.local/share/nautilus-python/extensions
+    WITH_CODE_MENU=${WITH_CODE_MENU:-1}; CODE_MENU_READY=0
     DESK_USER=tester; DESK_UID=1000; DESK_HOME=$W/home
     mkdir -p "$W/home" "$W/state"; touch "$GSDB"
     find_desktop_user() { return 0; }
@@ -33,7 +35,12 @@ desktop_env() {
                  printf '%s|%s|%s\n' "$2" "$3" "$4" >> "$GSDB" ;;
         esac
     }
-    eval "$(functions gs_set tune_desktop user_copy setup_fonts remove_fonts)"
+    vscode_installed() { [ "${HAVE_CODE:-1}" = 1 ]; }
+    files_app_installed() { [ "${HAVE_FILES:-1}" = 1 ]; }
+    pkg_installed() { [ "${HAVE_PYNAUTILUS:-1}" = 1 ]; }
+    pkg_in_archive() { [ "${PYNAUTILUS_OFFERED:-1}" = 1 ]; }
+    apt-get() { [ "${APT_FAIL:-0}" = 0 ]; }
+    eval "$(functions gs_set tune_desktop user_copy setup_fonts remove_fonts setup_code_menu remove_code_menu)"
 }
 
 run() { ( desktop_env; "$@" ) 2>&1 | sed "s|$W||g"; }
@@ -108,6 +115,44 @@ has   "LCD: colour smoothing kept"          "$out" "skip  greyscale smoothing (t
 lacks "LCD: smoothing setting untouched"    "$out" "font-antialiasing ="
 same  "LCD: one rule file"                  "$(ls "$W/home/.config/fontconfig/conf.d" | wc -l)" "1"
 has   "no Consolas: code font left alone"   "$out" "code font left as it is: Consolas is not installed"
+empty_work
+
+# --- "Open with VS Code" in the Files right-click menu
+MENU=$W/home/.local/share/nautilus-python/extensions/open-with-vscode.py
+out=$(WITH_CODE_MENU=0 run setup_code_menu)
+has   "--no-code-menu: nothing added"       "$out" "skip  left alone (--no-code-menu)"
+out=$(HAVE_FILES=0 run setup_code_menu)
+has   "no Files application: skipped"       "$out" "skip  the Files application (Nautilus) is not installed"
+out=$(HAVE_CODE=0 run setup_code_menu)
+has   "no VS Code: skipped"                 "$out" "skip  VS Code is not installed"
+out=$(HAVE_PYNAUTILUS=0 PYNAUTILUS_OFFERED=0 run setup_code_menu)
+has   "package not offered: skipped"        "$out" "skip  python3-nautilus is not offered by this Ubuntu release"
+out=$(HAVE_PYNAUTILUS=0 APT_FAIL=1 run setup_code_menu)
+has   "package install fails: reported"     "$out" "WARN  could not install python3-nautilus"
+same  "nothing written so far"              "$(find "$W/home" -type f | wc -l)" "0"
+
+out=$(HAVE_PYNAUTILUS=0 run setup_code_menu)
+has   "missing package is installed"        "$out" "ok    python3-nautilus"
+has   "menu entry added"                    "$out" 'ok    "Open with VS Code" added to the Files right-click menu'
+same  "the extension is the kit's file"     "$(cmp -s "$KIT/files/nautilus/open-with-vscode.py" "$MENU" && echo same)" "same"
+out=$(run setup_code_menu)
+has   "second run changes nothing"          "$out" 'skip  "Open with VS Code" menu entry (already in place)'
+echo junk > "$MENU"
+run setup_code_menu > /dev/null
+same  "a damaged extension is repaired"     "$(cmp -s "$KIT/files/nautilus/open-with-vscode.py" "$MENU" && echo same)" "same"
+
+out=$(SUDO_USER=tester run remove_code_menu)
+has   "undo removes the menu entry"         "$out" "ok    removed"
+same  "undo leaves no extension behind"     "$(find "$W/home" -name open-with-vscode.py | wc -l)" "0"
+out=$(SUDO_USER=tester run remove_code_menu)
+lacks "undo with nothing to remove is quiet" "$out" "removed"
+empty_work
+
+mkdir -p "$W/elsewhere" "$W/home/.local/share"
+ln -s "$W/elsewhere" "$W/home/.local/share/nautilus-python"
+out=$(run setup_code_menu)
+has   "a linked folder is refused"          "$out" "is a link; menu entry not added"
+same  "nothing written through the link"    "$(find "$W/elsewhere" -type f | wc -l)" "0"
 empty_work
 
 finish

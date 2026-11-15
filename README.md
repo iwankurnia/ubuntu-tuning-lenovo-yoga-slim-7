@@ -44,6 +44,7 @@ Run once with `sudo` after installing Ubuntu. It only acts on what is not alread
 | Face login | Installs Howdy, points it at the infrared camera, keeps the infrared light on, adds a Face ID-style popup. | `--no-face-login` |
 | Keyring | Makes a keyring without a password the default, so applications stop asking after a face login. | `--keep-keyring` |
 | Claude | Installs Claude Desktop and Claude Code from Anthropic's repositories, after checking the signing key. | `--no-claude` |
+| Files menu | Adds "Open with VS Code" to the right-click menu of Files, when VS Code is installed. | `--no-code-menu` |
 | Windows-like fonts | Selawik, Consolas and greyscale text smoothing. Off unless asked for. | on with `--windows-fonts` |
 
 Two behaviours worth knowing:
@@ -155,6 +156,14 @@ Ubuntu's own fonts and text smoothing are left alone unless you ask for this.
 | Code and terminal font: Consolas | The Visual Studio default. Only set when Consolas is installed. | your desktop settings |
 | Greyscale text smoothing, on OLED screens only | Ubuntu's colour smoothing is made for LCD stripes; on an OLED panel it puts coloured edges on letters in browsers and Electron applications. On an LCD it is left as it is. | `~/.config/fontconfig/conf.d/46-yoga-slim7-oled-smoothing.conf`, your desktop settings |
 
+### Files right-click menu
+
+| Change | Why | Where |
+|---|---|---|
+| "Open with VS Code" for selected files and folders, and for the empty part of a folder | VS Code's package adds no such entry to Files, so opening a folder meant starting VS Code first. | `~/.local/share/nautilus-python/extensions/open-with-vscode.py`, package `python3-nautilus` |
+
+The entry is added for the person who ran `sudo`, and only when VS Code (the `code` command) is installed; install VS Code later and run the script again to get it. Files reads the extension when it starts, so the entry appears after you log in again or run `nautilus -q`, which closes its open windows. Uninstalling VS Code hides the entry by itself.
+
 ### Tools
 
 | Tool | What it does | Where |
@@ -175,6 +184,7 @@ sudo bash install.sh --no-zswap       # do not switch on compressed swap
 sudo bash install.sh --no-speaker-tuning  # woofer fix only, no Dolby sound profile
 sudo bash install.sh --no-face-login  # do not install Howdy
 sudo bash install.sh --no-claude      # do not install Claude Desktop and Claude Code
+sudo bash install.sh --no-code-menu   # no "Open with VS Code" in the Files right-click menu
 sudo bash install.sh --keep-keyring   # keep the keyring locked by your login password
 sudo bash install.sh --no-lpmd        # do not install intel-lpmd
 sudo bash install.sh --force          # run where the kit refuses: older Ubuntu, not x86_64, or no battery
@@ -405,6 +415,7 @@ The kit was written on one laptop, so everything in it has been run and checked 
 | Keyring without a password | Laptops where face login is set up. | Skipped: with a password login the keyring unlocks by itself and stays protected. |
 | Battery charge limit (`yoga-power battery`) | Lenovo IdeaPad and Yoga, and laptops with a charge threshold (ThinkPad, ASUS, Dell and others). | Reports that the laptop offers no charge limit. |
 | Claude Desktop and Claude Code, Windows-like fonts | Any laptop. | |
+| "Open with VS Code" in the Files menu | Any laptop with GNOME's Files and VS Code installed. | Skipped. |
 
 ### Ubuntu releases
 
@@ -439,7 +450,7 @@ Only 26.10 has been run. Ubuntu derivatives such as Linux Mint are allowed with 
 bash tests/run.sh
 ```
 
-The tests need no `sudo` and change nothing: they run the installer's decisions against made-up laptops, batteries and Ubuntu releases in a throwaway folder, with `apt`, `systemctl`, `swapon` and the like replaced by stand-ins. They cover hardware detection, the swapfile replacement including interrupted runs, desktop options and fonts, and `yoga-power`.
+The tests need no `sudo` and change nothing: they run the installer's decisions against made-up laptops, batteries and Ubuntu releases in a throwaway folder, with `apt`, `systemctl`, `swapon` and the like replaced by stand-ins. They cover hardware detection, the swapfile replacement including interrupted runs, desktop options, fonts and the Files menu entry, and `yoga-power`.
 
 They show that the script decides correctly. They cannot show that a setting works on real hardware; only a run on that laptop does.
 
@@ -454,7 +465,7 @@ They show that the script decides correctly. They cannot show that a setting wor
 sudo bash install.sh --undo
 ```
 
-This removes the files the script wrote, the sound profile, Howdy (with its PPA), both Claude packages with their repositories and signing keys (`~/.claude` is kept), and the font rules (the Selawik files stay). It puts your previous desktop settings back, fonts included, and closing the lid suspends again.
+This removes the files the script wrote, the sound profile, Howdy (with its PPA), both Claude packages with their repositories and signing keys (`~/.claude` is kept), the font rules (the Selawik files stay) and the "Open with VS Code" menu entry. It puts your previous desktop settings back, fonts included, and closing the lid suspends again.
 
 What stays, on purpose:
 
