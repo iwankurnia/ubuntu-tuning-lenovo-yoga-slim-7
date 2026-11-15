@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Driver and battery-life tuning for the Lenovo Yoga Slim 7 14IMH9 (83CV) on Ubuntu 26.10.
+# Driver and battery-life tuning for Ubuntu laptops.
+#
+# Written for, and fully verified on, the Lenovo Yoga Slim 7 14IMH9 (83CV) with
+# Ubuntu 26.10. On other laptops, and on Ubuntu 24.04 or later, it applies the
+# general tuning and each hardware-specific part only where it finds that
+# hardware. Those other combinations are not tested; see the README.
 #
 #   Run once, after Ubuntu is installed:   sudo bash install.sh
 #   Remove everything it wrote:            sudo bash install.sh --undo
@@ -39,7 +44,6 @@ SWAP_PERCENT=150       # size of the swapfile, as a percentage of the RAM
 
 # Speaker sound tuning (Dolby profile rebuilt as a PipeWire filter)
 OPT_DIR=/opt/yoga-slim7
-TUNING_XML_NAME=DEV_0287_SUBSYS_17AA38D8_PCI_SUBSYS_383917AA.xml
 SPEAKER_TOOL_DIR=$OPT_DIR/speaker-tuning-to-easyeffects
 SPEAKER_TOOL_REPO=https://github.com/antoinecellerier/speaker-tuning-to-easyeffects.git
 SPEAKER_TOOL_TAG=v2026.10.1
@@ -87,14 +91,41 @@ CLAUDE_CODE_LIST=/etc/apt/sources.list.d/claude-code.list
 CLAUDE_MARKER=$STATE_DIR/claude-installed-by-kit
 KVM_MARKER=$STATE_DIR/kvm-added-by-kit
 
-# Everything here is in the Ubuntu 26.10 archive (checked 2026-11-15).
-PACKAGES=(
-    firmware-sof-signed alsa-ucm-conf alsa-utils      # sound firmware and routing
-    intel-media-va-driver vainfo intel-gpu-tools      # hardware video decode
-    thermald power-profiles-daemon                    # thermal and power profiles
-    powertop lm-sensors nvme-cli iw fwupd             # diagnostics and firmware updates
-)
 LPMD_PACKAGE=intel-lpmd                               # Intel's workload-aware CPU tuning daemon
+MIN_UBUNTU=24.04                                      # oldest Ubuntu release the kit runs on
+
+# Laptop models the whole kit has been run and checked on (DMI product names).
+VERIFIED_MODELS="83CV"
+
+# Sound codecs whose woofers the kernel does not route by itself:
+#   [codec subsystem ID]="fix the sound driver has to be loaded with"
+# Add a line only for a fix that has been confirmed on that hardware. To find
+# a laptop's ID:  grep -i 'subsystem id' /proc/asound/card*/codec#*
+declare -A SPEAKER_FIXES=(
+    [0x17aa38d8]="alc287-yoga9-bass-spk-pin"          # Lenovo Yoga Slim 7 14IMH9 (83CV)
+)
+
+# What this machine is; filled in by detect_hardware. YOGA_TEST_ROOT points at
+# a fake /sys, /proc and /etc, and is used only for testing.
+SYS=${YOGA_TEST_ROOT:-}/sys
+PROC=${YOGA_TEST_ROOT:-}/proc
+ETC=${YOGA_TEST_ROOT:-}/etc
+HW_VENDOR=""
+HW_PRODUCT=""
+HW_NAME=""
+HW_VERIFIED=0
+HW_CPU=""
+HW_HYBRID=0
+HW_GPU=""
+HW_BATTERY=0
+HW_NVME=0
+HW_OLED=0
+HW_PANEL=""
+HW_CODECS=""
+OS_ID=""
+OS_LIKE=""
+OS_VERSION=""
+OS_NAME=""
 
 MODE=install
 FORCE=0
@@ -112,6 +143,7 @@ KEEP_DESKTOP=0
 WITH_FONTS=0
 FONTS_READY=0
 FONT_CONF_NAME=45-yoga-slim7-fonts.conf
+FONT_SMOOTH_CONF_NAME=46-yoga-slim7-oled-smoothing.conf
 WARNINGS=0
 DESK_USER=""
 DESK_UID=""
@@ -144,7 +176,8 @@ Usage: sudo bash install.sh [--undo] [--keep-desktop] [--windows-fonts] [--no-hi
   --keep-keyring       leave the password keyring alone (it stays locked by your login
                        password, and asks for it after a face login)
   --no-lpmd            do not install intel-lpmd (Intel's workload-aware CPU daemon)
-  --force              run even if this is not a Yoga Slim 7 14IMH9 (83CV)
+  --force              run on a system the kit would refuse: not Ubuntu 24.04 or later,
+                       not an x86_64 machine, or no battery
   -h, --help           show this text
 
 With --undo the other options are ignored.
@@ -175,36 +208,138 @@ exec > >(tee -a "$LOG") 2>&1
 printf '\n##### %s  install.sh %s\n' "$(date '+%F %T')" "$*"
 
 # ---------------------------------------------------------------------------
+# What this machine is. Every later step asks these questions instead of
+# assuming the laptop the kit was first written for.
+detect_hardware() {
+    local f v
+    HW_VENDOR=$(cat "$SYS/class/dmi/id/sys_vendor" 2>/dev/null || true)
+    HW_PRODUCT=$(cat "$SYS/class/dmi/id/product_name" 2>/dev/null || true)
+    HW_NAME=$(cat "$SYS/class/dmi/id/product_version" 2>/dev/null || true)
+    case "$HW_NAME" in
+        ''|None|'System Version'|'Not Specified'|'Default string'|'To be filled'*) HW_NAME=$HW_PRODUCT ;;
+    esac
+    for v in $VERIFIED_MODELS; do
+        [ "$HW_PRODUCT" = "$v" ] && HW_VERIFIED=1
+    done
+
+    HW_CPU=$(awk -F': *' '/^vendor_id/ { print $2; exit }' "$PROC/cpuinfo" 2>/dev/null)
+    [ -d "$SYS/devices/cpu_atom" ] && HW_HYBRID=1          # an Intel CPU with two kinds of core
+    for f in "$SYS"/class/drm/card*/device/vendor; do
+        [ -r "$f" ] || continue
+        case "$(cat "$f")" in
+            0x8086) v=intel ;;
+            0x1002) v=amd ;;
+            0x10de) v=nvidia ;;
+            *) continue ;;
+        esac
+        case " $HW_GPU " in *" $v "*) ;; *) HW_GPU="${HW_GPU:+$HW_GPU }$v" ;; esac
+    done
+    for f in "$SYS"/class/power_supply/BAT*; do
+        [ -d "$f" ] && HW_BATTERY=1
+    done
+    for f in "$SYS"/class/nvme/nvme*; do
+        [ -e "$f" ] && HW_NVME=1
+    done
+    HW_CODECS=$(grep -his 'Subsystem Id:' "$PROC"/asound/card*/codec#* | awk '{ print tolower($3) }' | sort -u | tr '\n' ' ')
+    HW_CODECS=${HW_CODECS% }
+
+    # The built-in screen names itself in its EDID. Samsung's laptop OLED
+    # panels are called ATNA...; others say OLED outright. A panel that does
+    # neither is treated as an LCD.
+    for f in "$SYS"/class/drm/card*-eDP-*/edid "$SYS"/class/drm/card*-LVDS-*/edid; do
+        [ -r "$f" ] || continue                             # (sysfs reports its size as 0)
+        HW_PANEL=$(tr -c '[:print:]' '\n' < "$f" 2>/dev/null | grep -E '^[A-Za-z][A-Za-z0-9 ._/-]{5,12} *$' | head -n 2 | tr '\n' ' ')
+        HW_PANEL=$(echo $HW_PANEL)
+        [ -n "$HW_PANEL" ] || continue
+        if tr -c '[:print:]' '\n' < "$f" | grep -qE '^ATNA[0-9]|OLED'; then
+            HW_OLED=1
+        fi
+        break
+    done
+
+    if [ -r "$ETC/os-release" ]; then
+        OS_ID=$(. "$ETC/os-release"; echo "${ID:-}")
+        OS_LIKE=$(. "$ETC/os-release"; echo "${ID_LIKE:-}")
+        OS_VERSION=$(. "$ETC/os-release"; echo "${VERSION_ID:-}")
+        OS_NAME=$(. "$ETC/os-release"; echo "${PRETTY_NAME:-}")
+    fi
+}
+
+# refuse REASON: stops, unless --force was given.
+refuse() {
+    if [ "$FORCE" -eq 1 ]; then
+        warn "$1; continuing because of --force"
+    else
+        die "$1. Use --force to run anyway."
+    fi
+}
+
 check_machine() {
     say "Checking the machine"
-    local product version
-    product=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
-    version=$(cat /sys/class/dmi/id/product_version 2>/dev/null || true)
-    if [ "$product" = "83CV" ]; then
-        ok "$version ($product), kernel $(uname -r)"
-    elif [ "$FORCE" -eq 1 ]; then
-        warn "this is '$version' ($product), not an 83CV; continuing because of --force"
-    else
-        die "this is '$version' ($product), not a Yoga Slim 7 14IMH9 (83CV). Use --force to run anyway."
-    fi
+    detect_hardware
 
     if [ -d /run/casper ] || grep -q casper /proc/cmdline || [ "$(findmnt -no FSTYPE / 2>/dev/null)" = overlay ]; then
         die "this looks like the live USB session. Install Ubuntu to the SSD first, boot it, then run this script."
     fi
+    [ "$(uname -m)" = x86_64 ] || refuse "this is a $(uname -m) machine, and the kit was written for x86_64 laptops"
+    if [ "$OS_ID" = ubuntu ]; then
+        dpkg --compare-versions "${OS_VERSION:-0}" ge "$MIN_UBUNTU" \
+            || refuse "this is Ubuntu ${OS_VERSION:-(unknown)}; the kit needs $MIN_UBUNTU or later"
+    else
+        case " $OS_LIKE " in
+            *" ubuntu "*) warn "${OS_NAME:-this system} is built on Ubuntu but is not Ubuntu itself; the kit is untested here" ;;
+            *) refuse "this is ${OS_NAME:-not Ubuntu}; the kit is written for Ubuntu" ;;
+        esac
+    fi
+    [ "$HW_BATTERY" -eq 1 ] || refuse "no battery found, and the kit is for laptops"
+
+    local model=${HW_NAME:-unknown model}
+    [ -n "$HW_PRODUCT" ] && [ "$HW_PRODUCT" != "$HW_NAME" ] && model="$model ($HW_PRODUCT)"
+    ok "${HW_VENDOR:+$HW_VENDOR }$model, ${OS_NAME:-unknown system}, kernel $(uname -r)"
+    if [ "$HW_VERIFIED" -eq 1 ]; then
+        ok "a model the whole kit was verified on"
+    else
+        echo "   note  not a model the kit was verified on. The general tuning is applied, and each"
+        echo "         hardware-specific part only where its hardware is found."
+    fi
+    echo "   found CPU: ${HW_CPU:-unknown}$([ "$HW_HYBRID" -eq 1 ] && echo ' (two kinds of core)'); graphics: ${HW_GPU:-unknown};" \
+         "screen: ${HW_PANEL:-unknown}$([ "$HW_OLED" -eq 1 ] && echo ' (OLED)'); sound codec: ${HW_CODECS:-none}"
 }
 
 # ---------------------------------------------------------------------------
+pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+# True when apt has an installable version; package names differ between releases.
+pkg_in_archive() { apt-cache policy "$1" 2>/dev/null | grep -q 'Candidate: [^(]'; }
+
 install_packages() {
     say "Installing driver and power packages"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -q || warn "apt-get update failed; is the laptop online?"
 
-    local list=("${PACKAGES[@]}") pkg
-    [ "$WITH_LPMD" -eq 1 ] && list+=("$LPMD_PACKAGE")
+    # For every laptop: sound routing, diagnostics, firmware updates.
+    local list=(firmware-sof-signed alsa-ucm-conf alsa-utils powertop lm-sensors iw fwupd v4l-utils) pkg
+    # Hardware video decoding, so that playing video does not run on the CPU.
+    case " $HW_GPU " in *" intel "*) list+=(intel-media-va-driver vainfo intel-gpu-tools) ;; esac
+    case " $HW_GPU " in *" amd "*) list+=(mesa-va-drivers vainfo radeontop) ;; esac
+    [ "$HW_CPU" = GenuineIntel ] && list+=(thermald)       # Intel's thermal daemon
+    [ "$HW_NVME" -eq 1 ] && list+=(nvme-cli)
+    # The Balanced / Power Saver switch. Left alone when another tool already does that job.
+    if pkg_installed tuned-ppd || pkg_installed tlp || pkg_installed auto-cpufreq; then
+        skip "power-profiles-daemon (another power tool is installed and does that job)"
+    else
+        list+=(power-profiles-daemon)
+    fi
+    # Intel's workload-aware daemon only knows CPUs with two kinds of core.
+    [ "$WITH_LPMD" -eq 1 ] && [ "$HW_HYBRID" -eq 1 ] && list+=("$LPMD_PACKAGE")
 
+    local seen=" "
     for pkg in "${list[@]}"; do
-        if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
+        case "$seen" in *" $pkg "*) continue ;; esac
+        seen="$seen$pkg "
+        if pkg_installed "$pkg"; then
             skip "$pkg (already installed)"
+        elif ! pkg_in_archive "$pkg"; then
+            skip "$pkg (not offered by this Ubuntu release)"
         elif apt-get install -y -q "$pkg" >/dev/null; then
             ok "$pkg"
         else
@@ -212,31 +347,72 @@ install_packages() {
         fi
     done
 
-    if dpkg-query -W -f='${Status}' tlp 2>/dev/null | grep -q 'install ok installed'; then
+    if pkg_installed tlp && pkg_installed power-profiles-daemon; then
         warn "TLP is installed and fights with power-profiles-daemon. Remove one of them (suggested: sudo apt remove tlp)."
     fi
 }
 
 # ---------------------------------------------------------------------------
-# The kernel has no entry for this laptop's sound codec (17aa:38d8), so the two
-# woofers are not routed and the speakers sound thin. This applies the same
-# routing the kernel uses for the sister Yoga 9 models.
+# On some laptops the kernel does not know how the woofers are wired, so only
+# the small speakers play and the sound is thin. SPEAKER_FIXES lists the sound
+# codecs for which a fix is known; it is applied by loading the sound driver
+# with that fix named.
 fix_speakers() {
     say "Speakers (woofer routing)"
-    if ! grep -qis 'Subsystem Id: 0x17aa38d8' /proc/asound/card*/codec#*; then
-        warn "sound codec 17aa:38d8 not found, speaker fix skipped (check: cat /proc/asound/card*/codec#* | grep -i subsystem)"
+    local codec fix="" file card driver module="" param want
+    for codec in $HW_CODECS; do
+        if [ -n "${SPEAKER_FIXES[$codec]:-}" ]; then
+            fix=${SPEAKER_FIXES[$codec]}
+            break
+        fi
+    done
+    if [ -z "$fix" ]; then
+        if [ -n "$HW_CODECS" ]; then
+            skip "no speaker fix is known, or needed, for this laptop's sound codec ($HW_CODECS)"
+        else
+            skip "no HD-audio sound codec found"
+        fi
         return
     fi
 
-    local want='options snd-sof-intel-hda-generic hda_model=alc287-yoga9-bass-spk-pin'
+    # Which driver runs the codec decides where the option goes, and the
+    # option moved between kernel versions.
+    file=$(grep -lis "Subsystem Id: $codec" "$PROC"/asound/card*/codec#* | head -n 1)
+    card=${file#"$PROC"/asound/}
+    card=${card%%/*}
+    driver=$(basename "$(readlink -f "$SYS/class/sound/$card/device/driver" 2>/dev/null)" 2>/dev/null)
+    case "$driver" in
+        snd_hda_intel)
+            # The classic HD-audio driver.
+            param=model
+            module=snd-hda-intel
+            ;;
+        *)
+            # Sound Open Firmware (recent Intel laptops; the card's driver is
+            # then called skl_hda_dsp_generic or sof-audio-...). The option
+            # belongs to whichever SOF module has it in this kernel.
+            param=hda_model
+            for module in snd-sof-intel-hda-generic snd-sof-intel-hda-common; do
+                modinfo -p "$module" 2>/dev/null | grep -q '^hda_model:' && break
+                module=""
+            done
+            ;;
+    esac
+    if [ -z "$module" ]; then
+        warn "the sound driver here (${driver:-unknown}) has no option for the speaker fix '$fix'; skipped"
+        return
+    fi
+
+    want="options $module $param=$fix"
     if [ -f "$AUDIO_CONF" ] && grep -qxF "$want" "$AUDIO_CONF"; then
         skip "$AUDIO_CONF (already in place)"
         return
     fi
 
     cat > "$AUDIO_CONF" <<EOF
-# Yoga Slim 7 14IMH9 (83CV): route the two woofers (codec 17aa:38d8 has no kernel quirk).
-# Written by yoga-slim7-ubuntu/install.sh. Delete this file if a later kernel handles it natively.
+# Route the built-in woofers: the kernel has no entry for sound codec $codec
+# (${HW_NAME:-this laptop}). Written by yoga-slim7-ubuntu/install.sh.
+# Delete this file if a later kernel handles it natively.
 $want
 EOF
     ok "wrote $AUDIO_CONF"
@@ -248,43 +424,63 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# USB IDs of the built-in cameras: USB devices that are wired in (not
+# pluggable) and have a video interface.
+builtin_cameras() {
+    local dev iface
+    for dev in "$SYS"/bus/usb/devices/*; do
+        [ "$(cat "$dev/removable" 2>/dev/null)" = fixed ] || continue
+        for iface in "$dev"/*:*/bInterfaceClass; do
+            [ "$(cat "$iface" 2>/dev/null)" = 0e ] || continue
+            echo "$(cat "$dev/idVendor"):$(cat "$dev/idProduct")"
+            break
+        done
+    done | sort -u
+}
+
 tune_devices() {
     say "Device power saving"
 
     cat > "$SYSCTL_CONF" <<'EOF'
-# Yoga Slim 7 14IMH9 (written by yoga-slim7-ubuntu/install.sh).
+# Written by yoga-slim7-ubuntu/install.sh (laptop tuning kit).
 # The NMI watchdog wakes the CPU for nothing on a laptop.
 kernel.nmi_watchdog = 0
 EOF
     sysctl -q -p "$SYSCTL_CONF" && ok "wrote and applied $SYSCTL_CONF" || warn "could not apply $SYSCTL_CONF"
 
-    cat > "$UDEV_RULES" <<'EOF'
-# Yoga Slim 7 14IMH9 (written by yoga-slim7-ubuntu/install.sh).
-# PCI devices: allow runtime power management. Drivers that cannot do it ignore this.
-ACTION=="add", SUBSYSTEM=="pci", TEST=="power/control", ATTR{power/control}="auto"
-# Built-in camera (Chicony 04f2:b7f5): suspend it when no application is using it.
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="04f2", ATTR{idProduct}=="b7f5", TEST=="power/control", ATTR{power/control}="auto"
-# Charger plugged in or pulled out: switch between the mains and the battery settings.
-ACTION=="change", SUBSYSTEM=="power_supply", ATTR{type}=="Mains", RUN+="/usr/bin/systemctl --no-block start yoga-power-auto.service"
-EOF
+    local cameras cam
+    cameras=$(builtin_cameras)
+    {
+        echo '# Written by yoga-slim7-ubuntu/install.sh (laptop tuning kit).'
+        echo '# PCI devices: allow runtime power management. Drivers that cannot do it ignore this.'
+        echo 'ACTION=="add", SUBSYSTEM=="pci", TEST=="power/control", ATTR{power/control}="auto"'
+        for cam in $cameras; do
+            echo "# Built-in camera ($cam): suspend it when no application is using it."
+            echo "ACTION==\"add\", SUBSYSTEM==\"usb\", ATTR{idVendor}==\"${cam%:*}\", ATTR{idProduct}==\"${cam#*:}\", TEST==\"power/control\", ATTR{power/control}=\"auto\""
+        done
+        echo '# Charger plugged in or pulled out: switch between the mains and the battery settings.'
+        echo 'ACTION=="change", SUBSYSTEM=="power_supply", ATTR{type}=="Mains", RUN+="/usr/bin/systemctl --no-block start yoga-power-auto.service"'
+    } > "$UDEV_RULES"
     udevadm control --reload 2>/dev/null
     ok "wrote $UDEV_RULES"
 
     # Apply the same thing now, without waiting for the next boot.
-    local f dev n=0
+    local f dev n=0 c=0
     for f in /sys/bus/pci/devices/*/power/control; do
         [ -w "$f" ] && echo auto > "$f" 2>/dev/null && n=$((n + 1))
     done
     for dev in /sys/bus/usb/devices/*; do
-        [ "$(cat "$dev/idVendor" 2>/dev/null)" = 04f2 ] && [ "$(cat "$dev/idProduct" 2>/dev/null)" = b7f5 ] \
-            && echo auto > "$dev/power/control" 2>/dev/null
+        for cam in $cameras; do
+            [ "$(cat "$dev/idVendor" 2>/dev/null):$(cat "$dev/idProduct" 2>/dev/null)" = "$cam" ] \
+                && echo auto > "$dev/power/control" 2>/dev/null && c=$((c + 1))
+        done
     done
-    ok "runtime power management enabled on $n PCI devices and the camera"
+    ok "runtime power management enabled on $n PCI devices and $c built-in camera(s)"
 
     # Wi-Fi power save (Ubuntu normally has this on already; this pins it).
     if [ -d /etc/NetworkManager/conf.d ]; then
         cat > "$NM_CONF" <<'EOF'
-# Yoga Slim 7 14IMH9 (written by yoga-slim7-ubuntu/install.sh).
+# Written by yoga-slim7-ubuntu/install.sh (laptop tuning kit).
 # 3 = Wi-Fi power save on.
 [connection]
 wifi.powersave = 3
@@ -299,15 +495,16 @@ EOF
 # ---------------------------------------------------------------------------
 enable_services() {
     say "Power services"
-    local unit
-    for unit in thermald.service power-profiles-daemon.service; do
+    local unit units=(power-profiles-daemon.service)
+    [ "$HW_CPU" = GenuineIntel ] && units=(thermald.service "${units[@]}")
+    for unit in "${units[@]}"; do
         if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q .; then
             systemctl enable --now "$unit" >/dev/null 2>&1 && ok "$unit enabled" || warn "could not start $unit"
         else
-            warn "$unit is not installed"
+            skip "$unit (not installed)"
         fi
     done
-    if [ "$WITH_LPMD" -eq 1 ]; then
+    if [ "$WITH_LPMD" -eq 1 ] && [ "$HW_HYBRID" -eq 1 ]; then
         local found=0
         for unit in intel_lpmd.service intel-lpmd.service; do
             if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q .; then
@@ -315,14 +512,15 @@ enable_services() {
                 systemctl enable --now "$unit" >/dev/null 2>&1 && ok "$unit enabled" || warn "could not start $unit"
             fi
         done
-        [ "$found" -eq 1 ] || warn "intel-lpmd service not found"
+        [ "$found" -eq 1 ] || skip "intel-lpmd (not offered by this Ubuntu release)"
     fi
 
-    if grep -q '\[s2idle\]' /sys/power/mem_sleep 2>/dev/null; then
-        ok "suspend mode is s2idle (the only mode this CPU supports)"
-    else
-        warn "unexpected suspend mode: $(cat /sys/power/mem_sleep 2>/dev/null)"
-    fi
+    case "$(cat /sys/power/mem_sleep 2>/dev/null)" in
+        *'[s2idle]'*deep*|*deep*'[s2idle]'*) ok "suspend mode is s2idle; this laptop also offers the deeper 'deep' mode" ;;
+        *'[s2idle]'*) ok "suspend mode is s2idle (the only mode this laptop offers)" ;;
+        *'[deep]'*) ok "suspend mode is deep (suspend to RAM)" ;;
+        *) warn "unexpected suspend mode: $(cat /sys/power/mem_sleep 2>/dev/null)" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -380,7 +578,7 @@ tune_boot() {
     fi
     mkdir -p /etc/default/grub.d
     cat > "$GRUB_DROPIN" <<EOF
-# Yoga Slim 7 14IMH9 (written by yoga-slim7-ubuntu/install.sh).
+# Written by yoga-slim7-ubuntu/install.sh (laptop tuning kit).
 GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT $params"
 EOF
     if update-grub >/dev/null 2>&1; then
@@ -589,7 +787,7 @@ setup_hibernate() {
 
     mkdir -p /etc/default/grub.d
     cat > "$HIB_GRUB" <<EOF
-# Yoga Slim 7 14IMH9 (written by yoga-slim7-ubuntu/install.sh).
+# Written by yoga-slim7-ubuntu/install.sh (laptop tuning kit).
 # Tells the kernel where the hibernation image is ($HIB_SWAP).
 # Run install.sh again if the swapfile is ever recreated: its position changes.
 GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT $params"
@@ -726,7 +924,7 @@ gs_set() {
 }
 
 tune_desktop() {
-    say "Desktop options (OLED screen and idle behaviour)"
+    say "Desktop options (screen and idle behaviour)"
     if [ "$KEEP_DESKTOP" -eq 1 ]; then
         skip "left alone (--keep-desktop)"
         return
@@ -738,15 +936,19 @@ tune_desktop() {
     mkdir -p "$STATE_DIR"
     echo "$DESK_USER" > "$GS_USER_FILE"
 
-    # An OLED pixel that shows black is switched off, so the dark style is the
-    # biggest single saving on this screen.
+    # An OLED pixel that shows black is switched off, so on an OLED screen the
+    # dark style is the biggest single saving. On an LCD it saves nothing.
     local iface=org.gnome.desktop.interface power=org.gnome.settings-daemon.plugins.power theme
-    gs_set $iface color-scheme "'prefer-dark'"
-    theme=$(as_user gsettings get $iface gtk-theme 2>/dev/null | tr -d "'")
-    case "$theme" in
-        Yaru*-dark) ;;
-        Yaru*) gs_set $iface gtk-theme "'${theme}-dark'" ;;
-    esac
+    if [ "$HW_OLED" -eq 1 ]; then
+        gs_set $iface color-scheme "'prefer-dark'"
+        theme=$(as_user gsettings get $iface gtk-theme 2>/dev/null | tr -d "'")
+        case "$theme" in
+            Yaru*-dark) ;;
+            Yaru*) gs_set $iface gtk-theme "'${theme}-dark'" ;;
+        esac
+    else
+        skip "dark style (the screen is not an OLED panel, where it would save power)"
+    fi
 
     gs_set $power idle-dim true                              # dim the screen when idle
     gs_set $power ambient-enabled true                       # follow the light sensor
@@ -826,7 +1028,19 @@ setup_fonts() {
     gs_set $iface font-name "'Selawik 11'"
     gs_set $iface document-font-name "'Selawik 11'"
     gs_set org.gnome.desktop.wm.preferences titlebar-font "'Selawik Semi-Bold 11'"
-    gs_set $iface font-antialiasing "'grayscale'"
+    # Greyscale smoothing is for OLED panels only. On an LCD, Ubuntu's colour
+    # smoothing is the sharper one and stays.
+    if [ "$HW_OLED" -eq 1 ]; then
+        gs_set $iface font-antialiasing "'grayscale'"
+        # The rules file follows the setting: if you switched colour smoothing
+        # back on, the file that forces greyscale is not put back either.
+        if [ "$(as_user gsettings get $iface font-antialiasing 2>/dev/null)" = "'grayscale'" ]; then
+            user_copy "$src/$FONT_SMOOTH_CONF_NAME" "$conf_dir/$FONT_SMOOTH_CONF_NAME"; rc=$?
+            [ "$rc" -eq 2 ] && warn "could not install $FONT_SMOOTH_CONF_NAME"
+        fi
+    else
+        skip "greyscale smoothing (the screen is not an OLED panel; Ubuntu's colour smoothing is kept)"
+    fi
     if as_user fc-list Consolas 2>/dev/null | grep -q .; then
         gs_set $iface monospace-font-name "'Consolas 12'"
     else
@@ -841,6 +1055,8 @@ remove_fonts() {
     [ -n "$user" ] || user=${SUDO_USER:-}
     [ -n "$user" ] && [ "$user" != root ] || return 0
     home=$(getent passwd "$user" | cut -d: -f6)
+    f=$home/.config/fontconfig/conf.d/$FONT_SMOOTH_CONF_NAME
+    [ -f "$f" ] && [ ! -L "$f" ] && sudo -u "$user" rm -f "$f"
     f=$home/.config/fontconfig/conf.d/$FONT_CONF_NAME
     [ -f "$f" ] && [ ! -L "$f" ] || return 0
     sudo -u "$user" rm -f "$f" && ok "removed $f" || warn "could not remove $f"
@@ -862,6 +1078,22 @@ apt_install_each() {
     return "$failed"
 }
 
+# Prints the Dolby tuning file for this laptop's sound codec, if there is one.
+# The files are named after the codec they belong to, as Windows names them:
+# DEV_<codec>_SUBSYS_<subsystem ID>_...xml
+find_tuning_file() {
+    local codec id dir f
+    for codec in $HW_CODECS; do
+        id=$(printf '%s' "${codec#0x}" | tr 'a-f' 'A-F')
+        for dir in "$OPT_DIR/dolby-tuning" "$KIT_DIR/dolby-tuning"; do
+            for f in "$dir"/DEV_*_SUBSYS_"$id"_*.xml; do
+                [ -f "$f" ] && { echo "$f"; return 0; }
+            done
+        done
+    done
+    return 1
+}
+
 # True when the converter on disk is exactly the pinned commit with no changed files.
 speaker_tool_verified() {
     [ "$(git -C "$SPEAKER_TOOL_DIR" rev-parse HEAD 2>/dev/null)" = "$SPEAKER_TOOL_COMMIT" ] \
@@ -878,11 +1110,12 @@ tune_speaker_sound() {
         skip "left alone (--no-speaker-tuning)"
         return
     fi
-    local xml_src="$KIT_DIR/dolby-tuning/$TUNING_XML_NAME" xml="$OPT_DIR/dolby-tuning/$TUNING_XML_NAME"
-    if [ ! -f "$xml_src" ] && [ ! -f "$xml" ]; then
-        warn "tuning file dolby-tuning/$TUNING_XML_NAME is missing from the kit"
+    local xml_src xml
+    if ! xml_src=$(find_tuning_file); then
+        skip "the kit has no Dolby tuning file for this laptop's sound codec (${HW_CODECS:-none}); the README says how to add one"
         return
     fi
+    xml="$OPT_DIR/dolby-tuning/$(basename "$xml_src")"
     if ! find_desktop_user; then
         warn "no desktop session found. Run this script with sudo from a terminal inside GNOME to add the sound profile."
         return
@@ -892,7 +1125,15 @@ tune_speaker_sound() {
         return
     fi
 
-    apt_install_each "${SPEAKER_PACKAGES[@]}" || { warn "sound profile skipped because a package is missing"; return; }
+    # Package names differ between Ubuntu releases: libspa-0.2-modules-extra
+    # does not exist in 24.04, where PipeWire is packaged in one piece. What a
+    # release does not offer is left out; the converter itself then says
+    # whether PipeWire can load the plugins it needs.
+    local pkg wanted=()
+    for pkg in "${SPEAKER_PACKAGES[@]}"; do
+        pkg_in_archive "$pkg" && wanted+=("$pkg")
+    done
+    apt_install_each "${wanted[@]}" || { warn "sound profile skipped because a package could not be installed"; return; }
 
     # Keep the tuning file and the converter on the SSD, so the USB stick is not needed later.
     mkdir -p "$OPT_DIR/dolby-tuning"
@@ -966,6 +1207,12 @@ setup_face_login() {
     say "Face login (Howdy)"
     if [ "$WITH_FACE_LOGIN" -eq 0 ]; then
         skip "left alone (--no-face-login)"
+        return
+    fi
+    # An ordinary camera can be fooled with a photo, so face login is only set
+    # up where there is an infrared one.
+    if ! pkg_installed howdy && ! find_ir_camera >/dev/null 2>&1; then
+        skip "no infrared camera found, so face login is not set up on this laptop"
         return
     fi
 
@@ -1395,6 +1642,12 @@ setup_keyring() {
     say "Password keyring (no password prompts)"
     if [ "$KEEP_KEYRING" -eq 1 ]; then
         skip "left alone (--keep-keyring)"
+        return
+    fi
+    # The keyring only stays locked after a face login. With a password login
+    # it unlocks by itself, and is better left protected by that password.
+    if ! pkg_installed howdy; then
+        skip "not needed: without face login, your password unlocks the keyring when you log in"
         return
     fi
     local user=${SUDO_USER:-} home dir file pointer current

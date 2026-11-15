@@ -1,4 +1,6 @@
-# Ubuntu 26.10 tuning for the Lenovo Yoga Slim 7 14IMH9 (83CV)
+# Ubuntu laptop tuning: drivers, battery life, hibernation
+
+Written for, and fully verified on, the **Lenovo Yoga Slim 7 14IMH9 (83CV) with Ubuntu 26.10**. It also runs on other laptops and on Ubuntu 24.04 or later: there it applies the general tuning, and each hardware-specific part only where it finds that hardware. Those other combinations are untested; see [Other laptops and Ubuntu releases](#other-laptops-and-ubuntu-releases).
 
 Run this once, after Ubuntu is installed on the SSD and the laptop is online.
 Run it from a terminal inside your desktop session, so it can also set the desktop options:
@@ -17,7 +19,7 @@ yoga-power measure                # on battery: the real power draw
 sudo howdy add                    # save your face for face login
 ```
 
-The script only runs on an 83CV, refuses to run in the live USB session, and can be run again safely.
+The script starts by reporting what laptop and Ubuntu release it found. It refuses to run in the live USB session, and it can be run again safely.
 
 ## What the scripts do
 
@@ -29,7 +31,7 @@ Run once with `sudo` after installing Ubuntu. It only acts on what is not alread
 
 | Area | What it does | Skip with |
 |---|---|---|
-| Checks | Refuses to run on another laptop model or in the live USB session. | `--force` |
+| Checks | Detects the laptop, its hardware and the Ubuntu release. Refuses the live USB session, and anything that is not an x86_64 laptop on Ubuntu 24.04 or later. | `--force` |
 | Packages | Installs sound firmware, the Intel video decoder, and power and diagnostic tools. | |
 | Speakers | Routes the two woofers, which the kernel misses on this laptop. | |
 | Speaker sound | Rebuilds the Windows Dolby profile as a sound filter that loads automatically. | `--no-speaker-tuning` |
@@ -151,7 +153,7 @@ Ubuntu's own fonts and text smoothing are left alone unless you ask for this.
 | Interface font: Selawik | Microsoft's open stand-in for Segoe UI, so menus and windows look as they did on Windows. Shipped inside this kit. | `~/.local/share/fonts/selawik`, your desktop settings |
 | Segoe UI requests answered by Selawik | Teams, Outlook, WhatsApp and GitHub ask for Segoe UI first; without this they fall back to Arial. | `~/.config/fontconfig/conf.d/45-yoga-slim7-fonts.conf` |
 | Code and terminal font: Consolas | The Visual Studio default. Only set when Consolas is installed. | your desktop settings |
-| Greyscale text smoothing | Ubuntu's colour smoothing is made for LCD stripes; on this OLED panel it puts coloured edges on letters in browsers and Electron applications. | both of the above |
+| Greyscale text smoothing, on OLED screens only | Ubuntu's colour smoothing is made for LCD stripes; on an OLED panel it puts coloured edges on letters in browsers and Electron applications. On an LCD it is left as it is. | `~/.config/fontconfig/conf.d/46-yoga-slim7-oled-smoothing.conf`, your desktop settings |
 
 ### Tools
 
@@ -175,7 +177,7 @@ sudo bash install.sh --no-face-login  # do not install Howdy
 sudo bash install.sh --no-claude      # do not install Claude Desktop and Claude Code
 sudo bash install.sh --keep-keyring   # keep the keyring locked by your login password
 sudo bash install.sh --no-lpmd        # do not install intel-lpmd
-sudo bash install.sh --force          # run on a laptop that is not an 83CV (not tested anywhere else)
+sudo bash install.sh --force          # run where the kit refuses: older Ubuntu, not x86_64, or no battery
 ```
 
 Running the script again is safe. If you changed a desktop option back after the first run (for example from the dark style to the light one), the script leaves your choice alone.
@@ -249,11 +251,14 @@ fc-match "Segoe UI"      # Selawik
 fc-match monospace       # Consolas
 ```
 
-If text looks too soft with greyscale smoothing and you want Ubuntu's colour smoothing back, remove the last two `<match>` blocks from the rules file (the script keeps a rules file you have edited) and run:
+If text looks too soft with greyscale smoothing and you want Ubuntu's colour smoothing back:
 
 ```bash
 gsettings set org.gnome.desktop.interface font-antialiasing rgba
+rm ~/.config/fontconfig/conf.d/46-yoga-slim7-oled-smoothing.conf
 ```
+
+Later runs of the script then leave both alone. The script also keeps the main rules file if you have edited it.
 
 ## Battery charge limit
 
@@ -281,7 +286,7 @@ sudo yoga-power battery full      # charge to 100%
 
 The woofer fix makes all four speakers play. On top of that, the script rebuilds the sound profile Windows applies:
 
-- `dolby-tuning/` holds this laptop's own Dolby tuning file, copied from its Windows driver.
+- `dolby-tuning/` holds the Dolby tuning file of the Yoga Slim 7 14IMH9, copied from its Windows driver. The script picks the file whose name carries the laptop's sound codec ID; on a laptop with no matching file this step is skipped.
 - The script downloads [speaker-tuning-to-easyeffects](https://github.com/antoinecellerier/speaker-tuning-to-easyeffects) release `v2026.10.1` into `/opt/yoga-slim7` and runs its `dolby_to_pipewire.py` as you, never as root.
 - The download is checked against a fixed commit hash (`2838efda3e5b…`). If it is anything else, it is deleted and not run. To move to a newer release, change `SPEAKER_TOOL_TAG` and `SPEAKER_TOOL_COMMIT` in `install.sh` together.
 - The result is a PipeWire filter in `~/.config/pipewire/pipewire.conf.d/` that loads every time sound starts. No extra application has to run.
@@ -378,6 +383,65 @@ Things to know about the Linux beta:
 - **"Cowork requires the vhost_vsock kernel module":** run `sudo modprobe vhost_vsock` and restart the app.
 
 Skip both with `--no-claude`.
+
+## Other laptops and Ubuntu releases
+
+The kit was written on one laptop, so everything in it has been run and checked only there. To be useful elsewhere, every step now asks what hardware and which Ubuntu release it is on. On anything other than an 83CV with Ubuntu 26.10, treat a first run as a test: read the output, and use `--undo` if something is not right.
+
+### What applies where
+
+| Step | Applies to | Elsewhere |
+|---|---|---|
+| Device power saving, compressed swap, battery/mains switching, hibernation, `yoga-power`, `yoga-scale` | Any laptop. Hibernation needs GRUB and an ext4 root, with Secure Boot off. | Hibernation is skipped with the reason. |
+| Idle and dimming options | Any laptop with the GNOME desktop. | Skipped. |
+| Dark style, and greyscale smoothing with `--windows-fonts` | Laptops whose screen is an OLED panel. | Left alone: on an LCD the dark style saves nothing and colour smoothing is sharper. |
+| Intel thermal daemon, Intel video decoder | Intel CPUs and Intel graphics. | AMD graphics get the Mesa video decoder instead. |
+| `intel-lpmd` | Intel CPUs with two kinds of core (12th generation and later). | Not installed. |
+| Built-in camera sleeps when unused | Whichever built-in cameras the laptop has. | External cameras are never touched. |
+| Woofer routing | Sound codecs listed in `SPEAKER_FIXES` in `install.sh`: today only the Yoga Slim 7 14IMH9. | Skipped. |
+| Dolby sound profile | Laptops with a tuning file in `dolby-tuning/`: today only the Yoga Slim 7 14IMH9. | Skipped. |
+| Face login | Laptops with an infrared camera. | Skipped: an ordinary camera can be fooled with a photo. |
+| Infrared light for face login | This exact camera (Chicony `04f2:b7f5`). | Skipped; Howdy still works where the light comes on by itself. |
+| Keyring without a password | Laptops where face login is set up. | Skipped: with a password login the keyring unlocks by itself and stays protected. |
+| Battery charge limit (`yoga-power battery`) | Lenovo IdeaPad and Yoga, and laptops with a charge threshold (ThinkPad, ASUS, Dell and others). | Reports that the laptop offers no charge limit. |
+| Claude Desktop and Claude Code, Windows-like fonts | Any laptop. | |
+
+### Ubuntu releases
+
+The kit runs on Ubuntu 24.04 LTS and later. Package names were checked against the 24.04, 26.04 and 26.10 archives on 2026-11-15; a package a release does not offer is skipped with a note, not treated as a failure.
+
+| Difference | 24.04 LTS | 26.04 LTS | 26.10 |
+|---|---|---|---|
+| Early boot image | initramfs-tools | dracut | dracut |
+| PipeWire LV2 support, needed by the Dolby profile | no separate package; the converter reports whether it works | `libspa-0.2-modules-extra` | `libspa-0.2-modules-extra` |
+| `intel-lpmd` | 0.0.3 | 0.1.0 | 0.1.0 |
+| Howdy from its PPA | 3.0.1 | 3.0.1 | 3.0.1 |
+| Fractional display scales for `yoga-scale` | experimental in GNOME 46, off by default | yes | yes |
+
+Only 26.10 has been run. Ubuntu derivatives such as Linux Mint are allowed with a warning. Other distributions, and Ubuntu releases older than 24.04, are refused unless you pass `--force`.
+
+### The assumptions behind this
+
+- **A screen is an OLED only if it says so.** Samsung's laptop OLED panels are named `ATNA...`, and others contain `OLED` in their name. A panel that does neither is treated as an LCD, so an OLED from another maker would simply not get the dark style.
+- **A camera is built in if the laptop's firmware marks its USB port as not pluggable.** Where the firmware does not say, the camera is left alone.
+- **A sound fix is never guessed.** The woofer fix names an exact kernel fixup for an exact codec. Applying a similar-looking one to another laptop can leave its amplifier off.
+- **An Intel CPU with two kinds of core is one `intel-lpmd` knows.** On a CPU it does not know, the daemon starts and does nothing.
+
+### Adding another laptop
+
+- **Woofers silent or thin:** find the codec ID with `grep -i 'subsystem id' /proc/asound/card*/codec#*`, find the fixup the kernel uses for the nearest model, test it by hand with a file in `/etc/modprobe.d`, and only then add a line to `SPEAKER_FIXES`.
+- **Dolby profile:** copy the laptop's `DEV_xxxx_SUBSYS_xxxxxxxx_*.xml` from the Windows driver (`C:\Windows\System32\DriverStore\FileRepository\dax3_ext_*`) into `dolby-tuning/`.
+- **Verified model:** once the whole kit has been run and checked on a laptop, add its product name (`cat /sys/class/dmi/id/product_name`) to `VERIFIED_MODELS`.
+
+## Tests
+
+```bash
+bash tests/run.sh
+```
+
+The tests need no `sudo` and change nothing: they run the installer's decisions against made-up laptops, batteries and Ubuntu releases in a throwaway folder, with `apt`, `systemctl`, `swapon` and the like replaced by stand-ins. They cover hardware detection, the swapfile replacement including interrupted runs, desktop options and fonts, and `yoga-power`.
+
+They show that the script decides correctly. They cannot show that a setting works on real hardware; only a run on that laptop does.
 
 ## Not covered
 

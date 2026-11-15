@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# yoga-power: battery-life settings for the Lenovo Yoga Slim 7 14IMH9 on Ubuntu.
+# yoga-power: battery-life settings for Ubuntu laptops.
+# Written for the Lenovo Yoga Slim 7 14IMH9; the commands work on other laptops
+# wherever the hardware offers the same controls.
 set -uo pipefail
 
 # YOGA_TEST_ROOT points the tool at a fake /sys and /proc tree; used only for testing.
@@ -116,36 +118,58 @@ conservation_file() {
 charge_type_active() { sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$1"; }
 charge_type_long_life() { grep -oE 'Long[_ ]Life' "$1" | head -n 1; }
 
+# Laptops expose the charge limit in one of three ways:
+#  - a "Long Life" charge type        (Lenovo IdeaPad and Yoga, newer kernels)
+#  - a charge threshold in percent    (ThinkPad, ASUS, Dell, Huawei, Framework, ...)
+#  - a conservation_mode switch       (Lenovo IdeaPad and Yoga, older kernels)
+CONSERVE_PERCENT=80
+
+threshold_file() {
+    local b
+    b=$(bat_dir) || return 1
+    [ -e "$b/charge_control_end_threshold" ] && { echo "$b/charge_control_end_threshold"; return 0; }
+    return 1
+}
+
 battery_limit_status() {
-    local b ct cm
+    local b ct cm th
     b=$(bat_dir) || { echo "no battery found"; return; }
     ct="$b/charge_types"
-    if [ -r "$ct" ]; then
+    if [ -r "$ct" ] && [ -n "$(charge_type_long_life "$ct")" ]; then
         case "$(charge_type_active "$ct")" in
             Long_Life|"Long Life") echo "conserve (stops at about 80%)" ;;
             Standard)              echo "full (charges to 100%)" ;;
             Fast)                  echo "full, rapid charge (charges to 100%, faster and warmer)" ;;
             *)                     cat "$ct" ;;
         esac
+    elif th=$(threshold_file); then
+        if [ "$(cat "$th")" -lt 100 ] 2>/dev/null; then
+            echo "conserve (stops at $(cat "$th")%)"
+        else
+            echo "full (charges to 100%)"
+        fi
     elif cm=$(conservation_file); then
         if [ "$(cat "$cm")" = 1 ]; then echo "conserve (stops at about 80%)"; else echo "full (charges to 100%)"; fi
     else
-        echo "not available (ideapad-laptop driver not loaded?)"
+        echo "not available (this laptop offers no charge limit to Linux)"
     fi
 }
 
 battery_limit_set() {
     need_root battery "$1"
-    local b ct cm long_life
+    local b ct cm th long_life
     b=$(bat_dir) || { echo "no battery found" >&2; exit 1; }
     ct="$b/charge_types"
     if [ -e "$ct" ] && long_life=$(charge_type_long_life "$ct") && [ -n "$long_life" ]; then
         if [ "$1" = conserve ]; then echo "$long_life" > "$ct"; else echo 'Standard' > "$ct"; fi \
             || { echo "the kernel refused the change" >&2; exit 1; }
+    elif th=$(threshold_file); then
+        if [ "$1" = conserve ]; then echo "$CONSERVE_PERCENT" > "$th"; else echo 100 > "$th"; fi \
+            || { echo "the kernel refused the change" >&2; exit 1; }
     elif cm=$(conservation_file); then
         if [ "$1" = conserve ]; then echo 1 > "$cm"; else echo 0 > "$cm"; fi
     else
-        echo "this kernel exposes no charge limit control" >&2
+        echo "this laptop offers no charge limit to Linux" >&2
         exit 1
     fi
     echo "battery charge limit: $(battery_limit_status)"
@@ -395,7 +419,7 @@ status() {
     elif [ -f "$AUDIO_CONF" ]; then
         row "woofers" "fix installed but not active yet: reboot"
     else
-        row "woofers" "fix not installed"
+        row "woofers" "no fix installed (none is known or needed for most laptops)"
     fi
     # Under sudo, HOME may be root's; the sound profile belongs to the person who ran sudo.
     user_home=${HOME:-/nonexistent}
