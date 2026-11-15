@@ -19,6 +19,60 @@ sudo howdy add                    # save your face for face login
 
 The script only runs on an 83CV, refuses to run in the live USB session, and can be run again safely.
 
+## What the scripts do
+
+The kit is one installer and three small tools.
+
+### `install.sh`
+
+Run once with `sudo` after installing Ubuntu. It only acts on what is not already in place, so it is safe to run again, and `--undo` reverses it.
+
+| Area | What it does | Skip with |
+|---|---|---|
+| Checks | Refuses to run on another laptop model or in the live USB session. | `--force` |
+| Packages | Installs sound firmware, the Intel video decoder, and power and diagnostic tools. | |
+| Speakers | Routes the two woofers, which the kernel misses on this laptop. | |
+| Speaker sound | Rebuilds the Windows Dolby profile as a sound filter that loads automatically. | `--no-speaker-tuning` |
+| Device power | Lets idle internal devices and the camera sleep, pins Wi-Fi power save, turns off the NMI watchdog. | |
+| Power services | Enables Ubuntu's power profiles, Intel's thermal daemon and `intel-lpmd`. | `--no-lpmd` |
+| Compressed swap | Switches on zswap, so swapped memory is compressed in RAM before it touches the SSD. | `--no-zswap` |
+| Battery/mains switching | Applies Power Saver on battery and Balanced on mains: at boot, when the charger is plugged in or pulled out, and after waking. | |
+| Hibernation | Sizes the swapfile at 150% of the RAM and sets the boot options to resume from it. | `--no-hibernate` |
+| Desktop options | Dark style, screen dimming, screen off after 3 minutes, suspend after 10 idle minutes on battery. | `--keep-desktop` |
+| Face login | Installs Howdy, points it at the infrared camera, keeps the infrared light on, adds a Face ID-style popup. | `--no-face-login` |
+| Keyring | Makes a keyring without a password the default, so applications stop asking after a face login. | `--keep-keyring` |
+| Claude | Installs Claude Desktop and Claude Code from Anthropic's repositories, after checking the signing key. | `--no-claude` |
+| Windows-like fonts | Selawik, Consolas and greyscale text smoothing. Off unless asked for. | on with `--windows-fonts` |
+
+Two behaviours worth knowing:
+
+- **It respects your changes.** A desktop option you changed back by hand, such as the light style, is left alone on later runs.
+- **It protects hibernation.** If the swapfile is replaced and the boot options cannot follow, closing the lid falls back to plain suspend, so no open work is lost.
+
+### `yoga-power`
+
+| Command | What it does |
+|---|---|
+| `yoga-power status` | Power profile, battery, charge limit, hibernation, speaker and face-login state. |
+| `yoga-power measure [seconds]` | Real battery draw, and the hours left at that rate. |
+| `sudo yoga-power battery conserve` / `full` | Stop charging at about 80%, or charge to 100%. |
+| `sudo yoga-power hibernate-test` | Hibernates once, to check that the laptop resumes. |
+| `sudo yoga-power lid hibernate` / `suspend` / `suspend-then-hibernate` | What closing the lid does. |
+| `yoga-power sleep-log` | Recent suspend and hibernate reports. |
+| `sudo yoga-power apply` | Applies the battery or mains settings now. This is what runs automatically. |
+
+The settings for the automatic switching are in `/etc/yoga-power.conf`.
+
+### `yoga-scale`
+
+Gives screen sizes that GNOME's Settings does not offer, by combining the display scale with text scaling. `yoga-scale 110` or `yoga-scale 120` picks the split for you; `yoga-scale 125x0.9` lets you choose both parts. It warns when a display scale will blur older applications such as DBeaver.
+
+### `yoga-sleep-report`
+
+Runs by itself on every suspend and hibernate, and logs how long the laptop slept and how much battery that used.
+
+The sections below give the detail: what was verified on the laptop, every file each step writes, and how to adjust or undo it.
+
 ## Checked on the real laptop
 
 Two runs and a reboot on an 83CV with Ubuntu 26.10 (kernel 7.3.0) on 2026-11-15. The second run finished with no warnings.
@@ -40,7 +94,7 @@ Two runs and a reboot on an 83CV with Ubuntu 26.10 (kernel 7.3.0) on 2026-11-15.
 | Battery draw (`yoga-power measure`, light style, 35% brightness, Claude Desktop open) | 16.2 W with a video playing in Brave and other apps open; 10.5 W with media stopped; **7.5 W** after unplugging an external SSD, a USB hub, a mouse and a USB stick. Those four cost about 3 W. |
 | Plain suspend (S0ix) | Not measured yet; the lid hibernates on this laptop. |
 
-## What it changes
+## What it changes, in detail
 
 ### Battery life
 
