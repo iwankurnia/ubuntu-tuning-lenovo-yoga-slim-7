@@ -37,7 +37,8 @@ Two runs and a reboot on an 83CV with Ubuntu 26.10 (kernel 7.3.0) on 2026-11-15.
 | Swapfile at 150% of the RAM (22 GiB) | Works: the 16 GiB swapfile in use was replaced by a 22 GiB one, and the boot option, the running kernel and `/etc/fstab` all point at it. After the reboot the kernel was started with the new position, and a hibernate and resume with the new file worked (39 s in all, windows restored). |
 | `yoga-scale` | Works: 110, 112, 120, `125x0.9` and `125x0.8` were all applied on the laptop. |
 | `--windows-fonts` | Tried on the laptop and rendered correctly in a test window; the owner went back to Ubuntu's fonts, so it is off by default. |
-| Plain suspend (S0ix) and idle battery draw | Not measured yet. |
+| Battery draw (`yoga-power measure`, light style, 35% brightness, Claude Desktop open) | 16.2 W with a video playing in Brave and other apps open; 10.5 W with media stopped; **7.5 W** after unplugging an external SSD, a USB hub, a mouse and a USB stick. Those four cost about 3 W. |
+| Plain suspend (S0ix) | Not measured yet; the lid hibernates on this laptop. |
 
 ## What it changes
 
