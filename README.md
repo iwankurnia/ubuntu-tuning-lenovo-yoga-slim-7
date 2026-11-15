@@ -21,7 +21,7 @@ The script only runs on an 83CV, refuses to run in the live USB session, and can
 
 ## Checked on the real laptop
 
-First run on an 83CV with Ubuntu 26.10 (kernel 7.3.0), 2026-11-15:
+Two runs on an 83CV with Ubuntu 26.10 (kernel 7.3.0) on 2026-11-15. The second run finished with no warnings.
 
 | Part | Result |
 |---|---|
@@ -32,9 +32,9 @@ First run on an 83CV with Ubuntu 26.10 (kernel 7.3.0), 2026-11-15:
 | Face login | Howdy 3.0.1 installed and a face enrolled. |
 | Password-less keyring | Works; applications save into it without a prompt. |
 | Claude Desktop 5.11492.5, Claude Code 2.1.311 | Installed and running. |
-| Speaker sound profile | **Failed on the first run**: PipeWire could not load LV2 plugins. The missing package (`libspa-0.2-modules-extra`) is now installed by the script; not yet confirmed. |
-| Compressed swap (zswap) | Added after this run; not yet confirmed. |
-| Swapfile at 150% of the RAM (22 GiB) | Added after this run; not yet confirmed. The replacement was tested with simulated commands only. |
+| Speaker sound profile | Installed on the second run: PipeWire loads the `Dolby_Balanced` filter and attaches it to the speakers. It failed on the first run because `libspa-0.2-modules-extra` was missing; the script installs it now. How it sounds has not been judged. |
+| Compressed swap (zswap) | Boot options written on the second run; not confirmed until after a reboot. |
+| Swapfile at 150% of the RAM (22 GiB) | Works: the 16 GiB swapfile in use was replaced by a 22 GiB one, and the boot option, the running kernel and `/etc/fstab` all point at it. Hibernating to the new file has not been tested yet. |
 | `yoga-scale` | Works: 110, 112, 120, `125x0.9` and `125x0.8` were all applied on the laptop. |
 | `--windows-fonts` | Tried on the laptop and rendered correctly in a test window; the owner went back to Ubuntu's fonts, so it is off by default. |
 | Plain suspend (S0ix) and idle battery draw | Not measured yet. |
